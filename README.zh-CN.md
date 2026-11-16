@@ -171,6 +171,13 @@ npx skills add oil-oil/oil-dev-skills --skill oil-code-review
 - 脚本只依赖 Python 3.10+ 标准库。目前在 macOS 上测试过，Linux 和 Windows 还没有实机验证。
 - 这套 Skill 不负责打包和发布。签名、公证、部署这些步骤跟具体产品关系很大，建议写成目标仓库自己的脚本。
 
+## 延伸阅读
+
+这套工作流是从日常开发多模块项目里整理出来的。相关做法可以参考 Oil Book 里的两篇记录：
+
+- [《如何使用 AI 长期开发一个复杂项目》](https://book.oiloil.org/articles/agent-long-project-management?utm_source=github&utm_medium=referral&utm_campaign=oil-dev-skills-readme-zh)：Claude 与 Codex 怎么分工、什么时候跑快测和门禁，以及规则、测试与文档怎么日常维护。
+- [《怎样用好子 Agent》](https://book.oiloil.org/articles/subagent-workflow?utm_source=github&utm_medium=referral&utm_campaign=oil-dev-skills-readme-zh)：什么任务值得拆给子 Agent、角色怎么划分，以及跨工具调用怎么配合。
+
 <details>
 <summary>维护与测试</summary>
 
