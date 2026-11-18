@@ -18,7 +18,7 @@ SCRIPT_PATH = Path(__file__).resolve().parent.parent / "scripts" / "delegate.py"
 SPEC = importlib.util.spec_from_file_location("delegate_under_test", SCRIPT_PATH)
 DELEGATE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(DELEGATE)
-RUNNERS = ("claude", "workbuddy", "antigravity", "codex", "opencode", "dsh", "grok", "kimi")
+RUNNERS = ("claude", "workbuddy", "antigravity", "codex", "opencode", "dsh", "grok", "kimi", "cursor")
 
 FAKE_CLI = r'''#!{python}
 import json
@@ -73,9 +73,13 @@ if os.environ.get("FAKE_DSH_BAD_FINAL") == "1":
     print(json.dumps({{"type": "final", "sessionId": session, "text": "", "reason": {{"kind": "error", "error": {{"message": "bad final"}}}}}}))
     raise SystemExit(0)
 
+if os.environ.get("FAKE_CURSOR_BAD_SUBTYPE") == "1":
+    print(json.dumps({{"type": "result", "subtype": "error_during_execution", "is_error": False, "result": "partial", "session_id": session}}))
+    raise SystemExit(0)
+
 if os.environ.get("FAKE_EMPTY") == "1":
-    if runner in ("claude", "workbuddy"):
-        print(json.dumps({{"session_id": session, "result": "", "is_error": False}}))
+    if runner in ("claude", "workbuddy", "cursor"):
+        print(json.dumps({{"type": "result", "subtype": "success", "session_id": session, "result": "", "is_error": False}}))
     elif runner == "antigravity":
         print(json.dumps({{"conversation_id": session, "status": "SUCCESS", "response": ""}}))
     elif runner == "grok":
@@ -98,8 +102,8 @@ if os.environ.get("FAKE_CODEX_FAIL_NO_DETAIL") == "1":
     print(json.dumps({{"type": "turn.failed"}}))
     raise SystemExit(0)
 
-if runner in ("claude", "workbuddy"):
-    print(json.dumps({{"session_id": session, "result": "fake response", "is_error": False}}))
+if runner in ("claude", "workbuddy", "cursor"):
+    print(json.dumps({{"type": "result", "subtype": "success", "session_id": session, "result": "fake response", "is_error": False}}))
 elif runner == "antigravity":
     print(json.dumps({{"conversation_id": session, "status": "SUCCESS", "response": "fake response"}}))
 elif runner == "grok":
@@ -220,7 +224,7 @@ class DelegateTestCase(unittest.TestCase):
     def record_of(self) -> dict:
         return json.loads((self.root / "record.json").read_text(encoding="utf-8"))
 
-    def test_scan_is_read_only_and_reports_eight_runners(self) -> None:
+    def test_scan_is_read_only_and_reports_nine_runners(self) -> None:
         result = self.run_cli("onboard", "--scan")
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         payload = json.loads(result.stdout)
@@ -320,7 +324,7 @@ class DelegateTestCase(unittest.TestCase):
         onboard = self.run_cli(
             "onboard",
             "--enable",
-            "cc,wb,agy,dsh,claude,grok-build,kimi-code",
+            "cc,wb,agy,dsh,claude,grok-build,kimi-code,cursor-cli",
             "--default-runner",
             "CC",
         )
@@ -328,7 +332,7 @@ class DelegateTestCase(unittest.TestCase):
         payload = json.loads(onboard.stdout)
         self.assertEqual(
             payload["enabled_runners"],
-            ["claude", "workbuddy", "antigravity", "dsh", "grok", "kimi"],
+            ["claude", "workbuddy", "antigravity", "dsh", "grok", "kimi", "cursor"],
         )
         self.assertEqual(payload["default_runner"], "claude")
         self.assertIn("cc", payload["detected_runners"]["claude"]["aliases"])
@@ -336,8 +340,16 @@ class DelegateTestCase(unittest.TestCase):
         self.assertIn("anti", payload["detected_runners"]["antigravity"]["aliases"])
         self.assertIn("grok-build", payload["detected_runners"]["grok"]["aliases"])
         self.assertIn("kimi-code", payload["detected_runners"]["kimi"]["aliases"])
+        self.assertIn("cursor-agent", payload["detected_runners"]["cursor"]["aliases"])
+        self.assertIn("cursor-cli", payload["detected_runners"]["cursor"]["aliases"])
 
-        for alias, canonical in (("wb", "workbuddy"), ("kimi-code", "kimi"), ("anti", "antigravity")):
+        for alias, canonical in (
+            ("wb", "workbuddy"),
+            ("kimi-code", "kimi"),
+            ("anti", "antigravity"),
+            ("cursor-agent", "cursor"),
+            ("cursor-cli", "cursor"),
+        ):
             with self.subTest(alias=alias):
                 proc = self.run_task(alias, mode="write")
                 self.assertEqual(proc.returncode, 0, msg=proc.stderr)
@@ -374,6 +386,7 @@ class DelegateTestCase(unittest.TestCase):
             "opencode": ["--agent", "plan"],
             "dsh": ["--permission-mode", "read-only"],
             "grok": ["--permission-mode", "plan"],
+            "cursor": ["--mode", "plan"],
         }
         expected_write = {
             "claude": ["--dangerously-skip-permissions"],
@@ -384,6 +397,7 @@ class DelegateTestCase(unittest.TestCase):
             "dsh": ["--permission-mode", "danger-full-access"],
             "grok": ["--always-approve"],
             "kimi": [],
+            "cursor": ["--force"],
         }
         resume_flags = {
             "claude": "--resume",
@@ -394,6 +408,7 @@ class DelegateTestCase(unittest.TestCase):
             "dsh": "--session-id",
             "grok": "--resume",
             "kimi": "-S",
+            "cursor": "--resume",
         }
 
         for runner in RUNNERS:
@@ -417,6 +432,10 @@ class DelegateTestCase(unittest.TestCase):
                     self.assertFalse(any("inspect the fixture" in part for part in result["command"]))
                     if runner in ("codex", "dsh"):
                         self.assertEqual(result["command"][-1], "-")
+                    elif runner == "cursor":
+                        self.assertIn("--trust", record["argv"])
+                        self.assertNotIn("--force", record["argv"])
+                        self.assertIn("inspect the fixture", record["stdin"])
                     else:
                         self.assertIn("<prompt>", result["command"])
                     for artifact in (result["output_path"], result["events_path"], result["raw_stdout_path"], result["stderr_path"]):
@@ -448,6 +467,9 @@ class DelegateTestCase(unittest.TestCase):
                 if runner == "kimi":
                     self.assertNotIn("--auto", record["argv"])
                     self.assertIn("stream-json", record["argv"])
+                if runner == "cursor":
+                    self.assertIn("--trust", record["argv"])
+                    self.assertIn("inspect the fixture", record["stdin"])
 
             with self.subTest(runner=runner, mode="resume"):
                 record_path = self.root / "record.json"
@@ -646,6 +668,7 @@ class DelegateTestCase(unittest.TestCase):
             "dsh": "tui --resume fake-dsh-session",
             "grok": "--resume fake-grok-session",
             "kimi": "-S fake-kimi-session",
+            "cursor": "--resume fake-cursor-session",
         }
         for runner, command in expected.items():
             mode = "write" if runner == "kimi" else "read"
@@ -870,6 +893,26 @@ class DelegateTestCase(unittest.TestCase):
         self.assertEqual(result["events_path"], result["raw_stdout_path"])
         self.assertTrue(Path(result["events_path"]).is_file())
         self.assertNotIn("run_timeout_seconds", DELEGATE.default_config())
+
+    def test_cursor_bad_subtype_and_binary_isolation(self) -> None:
+        self.onboard_all()
+        bad_subtype = self.run_task("cursor", extra_env={"FAKE_CURSOR_BAD_SUBTYPE": "1"})
+        self.assertEqual(bad_subtype.returncode, 1)
+        bad_result = self.result_of(bad_subtype)
+        self.assertEqual(bad_result["status"], "failed")
+        self.assertTrue(bad_result["error"])
+
+        isolated_dir = self.root / "ide-only-bin"
+        isolated_dir.mkdir()
+        for decoy_name in ("cursor", "agent"):
+            decoy = isolated_dir / decoy_name
+            decoy.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            decoy.chmod(0o755)
+        with mock.patch.dict(os.environ, {"PATH": str(isolated_dir)}, clear=True):
+            with mock.patch.object(Path, "home", return_value=self.root / "empty-home"):
+                detected = DELEGATE.detect_binary("cursor", DELEGATE.default_config())
+        self.assertFalse(detected["installed"])
+        self.assertIn("cursor-agent", detected["error"])
 
 
 if __name__ == "__main__":

@@ -13,11 +13,12 @@
 - [DeepSeek Harness](#deepseek-harness)
 - [Grok Build](#grok-build)
 - [Kimi Code](#kimi-code)
+- [Cursor](#cursor)
 - [失败处理](#失败处理)
 
 ## 共同约束
 
-正式 Runner 名为 `claude`、`workbuddy`、`antigravity`、`codex`、`opencode`、`dsh`、`grok`、`kimi`。别名包括 `cc/claude-code`、`wb/codebuddy/cbc`、`agy/anti`、`deepseek/deepseek-harness`、`grok-build`、`kimi-code`。名称不区分大小写；启用、默认 Runner、单次委托和二进制路径配置都使用同一套别名解析，保存时统一转为正式 Runner 名。
+正式 Runner 名为 `claude`、`workbuddy`、`antigravity`、`codex`、`opencode`、`dsh`、`grok`、`kimi`、`cursor`。别名包括 `cc/claude-code`、`wb/codebuddy/cbc`、`agy/anti`、`deepseek/deepseek-harness`、`grok-build`、`kimi-code`、`cursor-agent/cursor-cli`。名称不区分大小写；启用、默认 Runner、单次委托和二进制路径配置都使用同一套别名解析，保存时统一转为正式 Runner 名。
 
 优先级：环境变量 `OIL_DELEGATE_<RUNNER>_BIN` → 配置中的 runner path → PATH → 已知安装目录。所有调用使用 argv 数组，prompt 不经过 shell。常规调用不指定模型、provider 或思考强度。
 
@@ -116,6 +117,17 @@
 - 认证：复用 Kimi Code 已有登录；静态 deny 规则仍然有效，登录由官方 CLI 另行完成。
 
 官方参考：[Kimi Command](https://www.kimi.com/code/docs/en/kimi-code-cli/reference/kimi-command.html)。
+
+## Cursor
+
+- 发现：`cursor-agent`，Runner 名为 `cursor`，接受 `cursor-agent`、`cursor-cli`。不直接匹配 `cursor` 编辑器命令或通用 `agent`，避免误命中 Cursor IDE 启动器或其他同名 CLI。
+- 新建：`cursor-agent -p --output-format json --workspace <workspace> --trust ...`，prompt 从 stdin 传入；续接增加 `--resume <session_id>`。
+- read：`--mode plan`（配合 `--trust` 免交互信任工作区，不加 `--force`）。
+- write：`--force`（配合 `--trust`，自动放行文件修改与命令执行；静态 deny 规则、hooks 与团队安全策略仍然有效）。
+- 解析：最终 JSON 的 `session_id`、`result`、`is_error` 与 `subtype`；已知 `subtype` 不是 `success` 时判为失败。
+- 认证：复用 `cursor-agent login` 登录态或环境已有的 `CURSOR_API_KEY` / `CURSOR_AUTH_TOKEN`；包装器不读取或传递密钥。
+
+官方参考：[Cursor CLI Headless Mode](https://cursor.com/docs/cli/headless)。
 
 ## 失败处理
 

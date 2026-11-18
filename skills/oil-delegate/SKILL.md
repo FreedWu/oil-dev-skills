@@ -1,9 +1,9 @@
 ---
 name: oil-delegate
-description: "把边界清楚的单次任务委托给 Claude Code（cc）、WorkBuddy（wb）、Antigravity（agy）、Codex、OpenCode、DeepSeek Harness（dsh）、Grok Build（grok）或 Kimi Code（kimi）CLI，返回结构化结果并续接原会话；处理首次静默扫描、启用执行器与默认选择，并可按用途（代码审查、方案挑刺、疑难会诊、实现）记住各自交给谁。用户明确要求 oil-delegate、统一调用或用上述全称/别名继续这些外部 CLI Agent 时使用；不用于普通直接问答或显式 /codex。"
+description: "把边界清楚的单次任务委托给 Claude Code（cc）、WorkBuddy（wb）、Antigravity（agy）、Codex、Cursor、OpenCode、DeepSeek Harness（dsh）、Grok Build（grok）或 Kimi Code（kimi）CLI，返回结构化结果并续接原会话；处理首次静默扫描、启用执行器与默认选择，并可按用途（代码审查、方案挑刺、疑难会诊、实现）记住各自交给谁。用户明确要求 oil-delegate、统一调用或用上述全称/别名继续这些外部 CLI Agent 时使用；不用于普通直接问答或显式 /codex。"
 license: MIT
 metadata:
-  version: "0.6.0"
+  version: "0.7.0"
 ---
 
 # oil-delegate
@@ -51,7 +51,7 @@ metadata:
 2. 展示已安装 runner、版本、来源、能力和 aliases，说明“已安装不等于已认证”。首次配置前读 [Runner 适配参考](references/runners.md)，讲清 read/write 权限差异、外部服务费用与任务文本会交给对应 provider。
 3. 询问启用哪些 runner，以及默认使用一个还是每次询问。得到回答后才保存：
    ```text
-   DELEGATE onboard --enable <claude,workbuddy,antigravity,codex,opencode,dsh,grok,kimi> --default-runner <runner|ask>
+   DELEGATE onboard --enable <claude,workbuddy,antigravity,codex,opencode,dsh,grok,kimi,cursor> --default-runner <runner|ask>
    ```
 
 名称不区分大小写，启用、默认项、委托和二进制路径配置都走同一套别名解析，保存时统一转为正式 Runner 名；完整映射见 [Runner 适配参考](references/runners.md)。
@@ -139,4 +139,4 @@ DELEGATE run --runner <原 runner> \
 
 - [references/runners.md](references/runners.md)：只在首次配置、显式只读、排查特定 CLI 或维护适配器时阅读相关 Runner 小节；日常最高权限委托不需要读取。
 - [scripts/delegate.py](scripts/delegate.py)：扫描、配置、调用、解析与运行产物的确定性工具；使用 Skill 时不需要阅读源码。
-- [tests/test_delegate.py](tests/test_delegate.py)：八种 Runner 的回归测试；只在开发或整改时读取相关部分。
+- [tests/test_delegate.py](tests/test_delegate.py)：九种 Runner 的回归测试；只在开发或整改时读取相关部分。

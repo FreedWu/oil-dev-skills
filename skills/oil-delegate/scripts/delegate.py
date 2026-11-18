@@ -30,6 +30,7 @@ SUPPORTED_RUNNERS = (
     "dsh",
     "grok",
     "kimi",
+    "cursor",
 )
 RUNNER_LABELS = {
     "claude": "Claude Code (claude/cc)",
@@ -40,6 +41,7 @@ RUNNER_LABELS = {
     "dsh": "DeepSeek Harness (dsh)",
     "grok": "Grok Build (grok)",
     "kimi": "Kimi Code (kimi)",
+    "cursor": "Cursor (cursor/cursor-agent)",
 }
 RUNNER_BINARIES = {
     "claude": ("claude",),
@@ -50,6 +52,7 @@ RUNNER_BINARIES = {
     "dsh": ("dsh",),
     "grok": ("grok",),
     "kimi": ("kimi",),
+    "cursor": ("cursor-agent",),
 }
 RUNNER_ALIASES = {
     "cc": "claude",
@@ -63,6 +66,8 @@ RUNNER_ALIASES = {
     "deepseek-harness": "dsh",
     "grok-build": "grok",
     "kimi-code": "kimi",
+    "cursor-agent": "cursor",
+    "cursor-cli": "cursor",
 }
 # Bump when the `run --json` result fields change incompatibly.
 CONTRACT_VERSION = 1
@@ -76,6 +81,7 @@ RESUME_TEMPLATES = {
     "dsh": ("{bin}", "tui", "--resume", "{sid}"),
     "grok": ("{bin}", "--resume", "{sid}"),
     "kimi": ("{bin}", "-S", "{sid}"),
+    "cursor": ("{bin}", "--resume", "{sid}"),
 }
 EXIT_NEEDS_ONBOARDING = 10
 EXIT_NEEDS_RUNNER_CHOICE = 11
@@ -234,6 +240,8 @@ def detect_binary(runner: str, config: dict[str, Any]) -> dict[str, Any]:
         Path("/opt/homebrew/bin"),
         Path("/usr/local/bin"),
     ]
+    if os.environ.get("LOCALAPPDATA"):
+        fallback_dirs.append(Path(os.environ["LOCALAPPDATA"]) / "cursor-agent")
     for directory in fallback_dirs:
         for binary in RUNNER_BINARIES[runner]:
             candidate = directory / binary
@@ -244,6 +252,15 @@ def detect_binary(runner: str, config: dict[str, Any]) -> dict[str, Any]:
                     "source": "known-path",
                     "error": None,
                 }
+            if os.name == "nt" and directory.is_dir():
+                win_found = shutil.which(binary, path=str(directory))
+                if win_found and is_executable(Path(win_found)):
+                    return {
+                        "installed": True,
+                        "path": str(Path(win_found).resolve()),
+                        "source": "known-path",
+                        "error": None,
+                    }
 
     if runner == "workbuddy" and sys.platform == "darwin":
         candidate = Path(
@@ -745,6 +762,13 @@ def build_invocation(
         cmd.extend(["--json", "-"])
         return cmd, prompt, env
 
+    if runner == "cursor":
+        cmd = [binary, "-p", "--output-format", "json", "--workspace", str(workspace), "--trust"]
+        if session_id:
+            cmd.extend(["--resume", session_id])
+        cmd.extend(["--mode", "plan"] if mode == "read" else ["--force"])
+        return cmd, prompt, env
+
     raise DelegateError(f"Unsupported runner: {runner}")
 
 
@@ -845,7 +869,7 @@ def parse_runner_output(
     error: str | None = None
     protocol_ok = True
 
-    if runner in ("claude", "workbuddy", "antigravity"):
+    if runner in ("claude", "workbuddy", "antigravity", "cursor"):
         obj = json_object(raw_out)
         if not obj:
             protocol_ok = False
@@ -856,10 +880,15 @@ def parse_runner_output(
             if obj.get("status") != "SUCCESS":
                 error = error_message(obj.get("error") or obj.get("status"))
         else:
-            session_id = obj.get("session_id") or session_id
+            session_id = obj.get("session_id") or nested_session_id(obj) or session_id
             response = str(obj.get("result") or "")
-            if obj.get("is_error"):
-                error = response or "CLI reported an error"
+            if obj.get("is_error") or (
+                runner == "cursor" and obj.get("subtype") not in (None, "success")
+            ):
+                error = (
+                    error_message(obj.get("error") or response or obj.get("subtype"))
+                    or "CLI reported an error"
+                )
 
     elif runner == "grok":
         obj = json_object(raw_out)
