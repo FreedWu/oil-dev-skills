@@ -1,9 +1,9 @@
 ---
 name: oil-delegate
-description: "把边界清楚的单次任务委托给 Claude Code（cc）、WorkBuddy（wb）、Antigravity（agy）、Codex、Cursor、OpenCode、DeepSeek Harness（dsh）、Grok Build（grok）或 Kimi Code（kimi）CLI，返回结构化结果并续接原会话；处理首次静默扫描、启用执行器与默认选择，并可按用途（代码审查、方案挑刺、疑难会诊、实现）记住各自交给谁。用户明确要求 oil-delegate、统一调用或用上述全称/别名继续这些外部 CLI Agent 时使用；不用于普通直接问答或显式 /codex。"
+description: "把边界清楚的单次任务委托给 Claude Code（cc）、WorkBuddy（wb）、Antigravity（agy）、Codex、Cursor、OpenCode、DeepSeek Harness（dsh）、Grok Build（grok）或 Kimi Code（kimi）CLI，返回结构化结果并续接原会话；处理首次静默扫描、启用执行器、模型选择与默认项，并可按用途（代码审查、方案挑刺、疑难会诊、实现）记住各自交给谁。用户明确要求 oil-delegate、统一调用或用上述全称/别名继续这些外部 CLI Agent 时使用；不用于普通直接问答或显式 /codex。"
 license: MIT
 metadata:
-  version: "0.7.0"
+  version: "0.8.0"
 ---
 
 # oil-delegate
@@ -14,7 +14,7 @@ metadata:
 
 - 用户只说自然语言，由当前 Agent 执行包装器，不要求用户另开终端。
 - 每次只委托一个边界清楚的任务；用户点名的 runner 优先，按角色委托时用该角色保存的选择，其余情况使用默认值，不自动换 runner。
-- 沿用各 CLI 的模型、provider 与登录，不传递或保存密钥，不把密钥写入提示词。
+- 未点名模型时沿用该 runner 已保存的默认模型或各 CLI 自身默认；沿用各 CLI 的 provider 与登录，不传递或保存密钥，不把密钥写入提示词。
 - 调用方负责范围、权限和最终验收；外部 Agent 的自报结果不能替代工作区检查与真实测试。
 
 ## 先选择模式
@@ -25,7 +25,7 @@ metadata:
 | 新任务 | 把一次分析、评审或修改交给外部 Agent | 整理委托契约 → `run` → 读取结果并验收 | 汇报结论与验证证据 |
 | 续接任务 | 对同一 CLI 的上一轮结果追问或返工 | 核对 runner 与 session ID → `run --session` | 汇报本轮变化 |
 | 按角色委托 | 其他 Skill 委托审查、方案挑刺、会诊或实现 | `run --role` → 按返回状态处理 | 汇报结论与验证证据 |
-| 配置与诊断 | 查看环境、预览权限或处理失败 | `onboard --scan`、`config`、`run --dry-run` | 给出明确下一步 |
+| 配置与诊断 | 查看环境、可用模型、预览权限或处理失败 | `onboard --scan`、`config`、`models`、`run --dry-run` | 给出明确下一步 |
 
 ## 委托契约
 
@@ -60,10 +60,12 @@ metadata:
 
 未指定 runner 且没有默认值时，`run` 返回 `NEEDS_RUNNER_CHOICE`。询问本次选择；只有用户同意沉淀偏好时，才运行 `DELEGATE config --set-default-runner <runner>`。
 
-查看配置或指定非标准二进制路径：
+查看配置、记住某 runner 的默认模型/思考强度（传 `default` 清除）或指定非标准二进制路径：
 
 ```text
 DELEGATE config
+DELEGATE config --set-model <runner>=<model_id|default>
+DELEGATE config --set-effort <runner>=<level|default>
 DELEGATE config --set-bin <runner>=<可执行文件绝对路径>
 ```
 
@@ -72,16 +74,19 @@ DELEGATE config --set-bin <runner>=<可执行文件绝对路径>
 - 默认省略 `--mode`，使用 `write` 和各 CLI 的最高权限；分析、探索和评审也不自动降级。
 - 只有用户明确要求只读、plan 或限制权限时才使用 `--mode read`；按读类角色委托时由角色自动只读。Kimi 的非交互模式自带 auto 权限，不能保证只读，因此拒绝 read，不伪装支持。
 - 默认使用当前工作目录，跨项目时显式指定 `--workspace`。
+- 用户点名模型或思考强度时：先运行 `DELEGATE models --runner <名称> --json` 查看该 CLI 的真实模型列表，把口语名称（如“Gemini 4 Carbon”）匹配为真实 ID 后传 `--model <id>`（需单独覆盖思考强度时传 `--effort <level>`；`agy` 模型 ID 已含档位后缀时直接传完整 ID）。若返回 `NO_MODEL_LIST_COMMAND`，仅在用户已给精确 ID 或官方文档可核实时传 `--model`，口语简称无法确认时先问用户，不猜测 ID；返回 `MODEL_FLAG_UNSUPPORTED`（如 `dsh`）或不支持 `--effort` 时如实说明。优先级：`--model` / `--effort` > `config` 默认值 > CLI 自身默认。
 - 调用：
 
 ```text
+DELEGATE models --runner <名称> --json
 DELEGATE run --runner <名称> \
+  --model <模型ID> \
   --workspace "<项目绝对路径>" \
   --file "<相对入口文件>" \
   --prompt "<目标、边界、完成标准与真实验证命令>"
 ```
 
-已配置默认 runner 时省略 `--runner`。启动前需要核对参数时追加 `--dry-run`；预览不会启动外部 Agent。
+未点名模型时省略 `models` 与 `--model`；已配置默认 runner 时省略 `--runner`。启动前需要核对参数时追加 `--dry-run`；预览不会启动外部 Agent。
 
 ### 按角色委托
 
@@ -117,7 +122,7 @@ DELEGATE run --runner <原 runner> \
   --prompt "<本轮新发现、追问或修正要求>"
 ```
 
-续接只发送本轮新信息，不重复整个任务。跨 runner 不能复用 session ID；需要第二意见时开启新任务并补充必要背景。DSH 续接必须使用原 cwd，其 ownership、preset 与 cwd 校验失败时如实报告，不绕过。
+续接只发送本轮新信息，不重复整个任务；本轮需要换模型时同样传 `--model <id>`（`dsh` 除外）。跨 runner 不能复用 session ID；需要第二意见时开启新任务并补充必要背景。DSH 续接必须使用原 cwd，其 ownership、preset 与 cwd 校验失败时如实报告，不绕过。
 
 ### 4. 验收与失败恢复
 
@@ -129,7 +134,7 @@ DELEGATE run --runner <原 runner> \
 
 ## 输出与停止条件
 
-成功后脚本输出 `status`、`session_id`、`runner`、`output_path`、`result_path`、`events_path` 和 `elapsed`。每次运行有独立目录，包含 prompt、精简 Markdown、结构化 result、原始 stdout/stderr 与事件日志。result 里的 `resume_command` 是用户在终端直接续接该会话的命令。
+成功后脚本输出 `status`、`session_id`、`runner`、`model`、`model_source`、`effort`、`effort_source`、`output_path`、`result_path`、`events_path` 和 `elapsed`（来源字段取值为 `flag`、`config` 或 `cli-default`）。每次运行有独立目录，包含 prompt、精简 Markdown、结构化 result、原始 stdout/stderr 与事件日志。result 里的 `resume_command` 是用户在终端直接续接该会话的命令。
 
 给其他程序调用时追加 `--json`：stdout 只输出一个 JSON 对象，带 `contract_version`（当前为 1）。成功、失败、`NEEDS_ONBOARDING`、`NEEDS_RUNNER_CHOICE`、`NEEDS_ROLE_CHOICE`、`USE_HOST`、`DRY_RUN` 和参数错误（`status: ERROR`）都用这个格式，退出码与普通模式一致。
 

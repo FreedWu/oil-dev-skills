@@ -34,6 +34,27 @@ if os.environ.get("FAKE_CALL_LOG"):
 if "--version" in args:
     print("fake-" + runner + "-1.0")
     raise SystemExit(0)
+if args == ["models"] or "--list-models" in args:
+    if os.environ.get("FAKE_MODELS_FAIL") == "1":
+        sys.stderr.write("models listing failed\n")
+        raise SystemExit(2)
+    if runner == "antigravity":
+        sys.stderr.write("Fetching available models...\n")
+        print("gemini-4-carbon-medium\tGemini 4 Carbon (Medium)")
+        print("gemini-4-carbon-high\tGemini 4 Carbon (High)")
+        raise SystemExit(0)
+    if runner == "grok":
+        print("Default model: grok-4.6\n\nAvailable models:\n  * grok-4.6 (default)\n  - grok-4.5")
+        raise SystemExit(0)
+    if runner == "opencode":
+        print("anthropic/claude-sonnet-4-5\nopenai/gpt-5")
+        raise SystemExit(0)
+    if runner == "cursor":
+        if os.environ.get("FAKE_CURSOR_NO_MODELS") == "1":
+            print("No models available for this account.")
+        else:
+            print("Available models:\n  - gpt-5 (default)\n  - sonnet-4-thinking")
+        raise SystemExit(0)
 if runner == "dsh" and "--help" in args:
     if os.environ.get("FAKE_DSH_LEGACY") == "1":
         print("--json --session-id")
@@ -913,6 +934,335 @@ class DelegateTestCase(unittest.TestCase):
                 detected = DELEGATE.detect_binary("cursor", DELEGATE.default_config())
         self.assertFalse(detected["installed"])
         self.assertIn("cursor-agent", detected["error"])
+
+    def test_model_passthrough_for_all_nine_runners_new_and_resume(self) -> None:
+        self.onboard_all()
+        record_path = self.root / "record.json"
+        sample_models = {
+            "claude": "claude-opus-4-6",
+            "workbuddy": "glm-5.1",
+            "antigravity": "gemini-4-carbon-high",
+            "codex": "gpt-5.4",
+            "opencode": "anthropic/claude-sonnet-4-5",
+            "grok": "grok-4.6",
+            "kimi": "kimi-k3.1-pro",
+            "cursor": "sonnet-4-thinking",
+        }
+        for runner, model_id in sample_models.items():
+            mode = "write" if runner == "kimi" else "read"
+            with self.subTest(runner=runner, phase="dry_run"):
+                dry = self.run_cli(
+                    "run",
+                    "--runner",
+                    runner,
+                    "--model",
+                    model_id,
+                    "--workspace",
+                    str(self.workspace),
+                    "--mode",
+                    mode,
+                    "--prompt",
+                    "preview model flag",
+                    "--dry-run",
+                    "--json",
+                )
+                self.assertEqual(dry.returncode, 0, msg=dry.stderr)
+                dry_payload = json.loads(dry.stdout)
+                self.assertEqual((dry_payload["model"], dry_payload["model_source"]), (model_id, "flag"))
+                self.assertIn(
+                    ["--model", model_id],
+                    [dry_payload["command"][i:i + 2] for i in range(len(dry_payload["command"]) - 1)],
+                )
+
+            with self.subTest(runner=runner, phase="new"):
+                proc = self.run_cli(
+                    "run",
+                    "--runner",
+                    runner,
+                    "--model",
+                    model_id,
+                    "--workspace",
+                    str(self.workspace),
+                    "--mode",
+                    mode,
+                    "--prompt",
+                    "run with model",
+                    extra_env={"FAKE_RECORD": str(record_path)},
+                )
+                self.assertEqual(proc.returncode, 0, msg=proc.stderr)
+                kv = dict(line.split("=", 1) for line in proc.stdout.splitlines() if "=" in line)
+                self.assertEqual((kv["model"], kv["model_source"]), (model_id, "flag"))
+                result = self.result_of(proc)
+                self.assertEqual((result["model"], result["model_source"]), (model_id, "flag"))
+                argv = self.record_of()["argv"]
+                self.assertIn(["--model", model_id], [argv[i:i + 2] for i in range(len(argv) - 1)])
+
+            with self.subTest(runner=runner, phase="resume"):
+                resumed_model = model_id + "-next"
+                resumed_proc = self.run_cli(
+                    "run",
+                    "--runner",
+                    runner,
+                    "--model",
+                    resumed_model,
+                    "--session",
+                    result["session_id"],
+                    "--workspace",
+                    str(self.workspace),
+                    "--mode",
+                    mode,
+                    "--prompt",
+                    "resume with switched model",
+                    "--json",
+                    extra_env={"FAKE_RECORD": str(record_path)},
+                )
+                self.assertEqual(resumed_proc.returncode, 0, msg=resumed_proc.stdout + resumed_proc.stderr)
+                resumed_payload = json.loads(resumed_proc.stdout)
+                self.assertEqual((resumed_payload["model"], resumed_payload["model_source"]), (resumed_model, "flag"))
+                self.assertEqual(resumed_payload["session_id"], result["session_id"])
+                argv = self.record_of()["argv"]
+                self.assertIn(["--model", resumed_model], [argv[i:i + 2] for i in range(len(argv) - 1)])
+                if runner == "codex":
+                    self.assertLess(argv.index("--model"), argv.index(result["session_id"]))
+
+        record_path.unlink(missing_ok=True)
+        for extra_flags in (["--dry-run", "--json"], []):
+            with self.subTest(runner="dsh", flags=extra_flags):
+                rejected = self.run_cli(
+                    "run",
+                    "--runner",
+                    "dsh",
+                    "--model",
+                    "deepseek-reasoner",
+                    "--workspace",
+                    str(self.workspace),
+                    "--prompt",
+                    "must reject",
+                    *extra_flags,
+                    extra_env={"FAKE_RECORD": str(record_path)},
+                )
+                self.assertEqual(rejected.returncode, 1)
+                combined = rejected.stdout + rejected.stderr
+                self.assertIn("--model", combined)
+                self.assertFalse(record_path.exists())
+
+    def test_model_priority_flag_over_config_over_cli_default_and_clear(self) -> None:
+        self.onboard_all()
+        record_path = self.root / "record.json"
+
+        baseline = self.run_cli(
+            "run",
+            "--runner",
+            "agy",
+            "--workspace",
+            str(self.workspace),
+            "--prompt",
+            "baseline default",
+            extra_env={"FAKE_RECORD": str(record_path)},
+        )
+        self.assertEqual(baseline.returncode, 0, msg=baseline.stderr)
+        base_kv = dict(line.split("=", 1) for line in baseline.stdout.splitlines() if "=" in line)
+        self.assertEqual((base_kv["model"], base_kv["model_source"]), ("", "cli-default"))
+        base_result = self.result_of(baseline)
+        self.assertIsNone(base_result["model"])
+        self.assertEqual(base_result["model_source"], "cli-default")
+        self.assertNotIn("--model", self.record_of()["argv"])
+
+        saved = self.run_cli("config", "--set-model", "AGY=gemini-4-argon-medium")
+        self.assertEqual(saved.returncode, 0, msg=saved.stderr)
+        self.assertEqual(json.loads(saved.stdout)["runner_models"], {"antigravity": "gemini-4-argon-medium"})
+        viewed = json.loads(self.run_cli("config").stdout)
+        self.assertEqual(viewed["runner_models"], {"antigravity": "gemini-4-argon-medium"})
+
+        from_config = self.run_cli(
+            "run",
+            "--runner",
+            "antigravity",
+            "--workspace",
+            str(self.workspace),
+            "--prompt",
+            "use saved config model",
+            extra_env={"FAKE_RECORD": str(record_path)},
+        )
+        self.assertEqual(from_config.returncode, 0, msg=from_config.stderr)
+        cfg_result = self.result_of(from_config)
+        self.assertEqual((cfg_result["model"], cfg_result["model_source"]), ("gemini-4-argon-medium", "config"))
+        self.assertIn(
+            ["--model", "gemini-4-argon-medium"],
+            [self.record_of()["argv"][i:i + 2] for i in range(len(self.record_of()["argv"]) - 1)],
+        )
+
+        overridden = self.run_cli(
+            "run",
+            "--runner",
+            "agy",
+            "--model",
+            "gemini-4-carbon-high",
+            "--workspace",
+            str(self.workspace),
+            "--prompt",
+            "override saved model",
+            extra_env={"FAKE_RECORD": str(record_path)},
+        )
+        self.assertEqual(overridden.returncode, 0, msg=overridden.stderr)
+        flag_result = self.result_of(overridden)
+        self.assertEqual((flag_result["model"], flag_result["model_source"]), ("gemini-4-carbon-high", "flag"))
+        self.assertIn(
+            ["--model", "gemini-4-carbon-high"],
+            [self.record_of()["argv"][i:i + 2] for i in range(len(self.record_of()["argv"]) - 1)],
+        )
+
+        cleared = self.run_cli("config", "--set-model", "agy=default")
+        self.assertEqual(cleared.returncode, 0, msg=cleared.stderr)
+        self.assertEqual(json.loads(cleared.stdout)["runner_models"], {})
+
+        after_clear = self.run_cli(
+            "run",
+            "--runner",
+            "agy",
+            "--workspace",
+            str(self.workspace),
+            "--prompt",
+            "back to cli default",
+            extra_env={"FAKE_RECORD": str(record_path)},
+        )
+        self.assertEqual(after_clear.returncode, 0, msg=after_clear.stderr)
+        cleared_result = self.result_of(after_clear)
+        self.assertEqual((cleared_result["model"], cleared_result["model_source"]), (None, "cli-default"))
+        self.assertNotIn("--model", self.record_of()["argv"])
+
+        self.assertEqual(self.run_cli("config", "--set-model", "dsh=default").returncode, 0)
+        for bad in ("dsh=deepseek-chat", "codex=", "codex", "unknown=gpt-5"):
+            with self.subTest(bad_set_model=bad):
+                self.assertEqual(self.run_cli("config", "--set-model", bad).returncode, 1)
+        blank_flag = self.run_cli(
+            "run", "--runner", "codex", "--model", "   ", "--workspace", str(self.workspace), "--prompt", "x"
+        )
+        self.assertEqual(blank_flag.returncode, 1)
+
+    def test_effort_passthrough_priority_and_unsupported_rejection(self) -> None:
+        self.onboard_all()
+        expected_effort_flags = {
+            "claude": ["--effort", "high"],
+            "workbuddy": ["--effort", "high"],
+            "antigravity": ["--effort", "high"],
+            "codex": ["-c", 'model_reasoning_effort="high"'],
+            "opencode": ["--variant", "high"],
+            "grok": ["--effort", "high"],
+        }
+        for runner, expected in expected_effort_flags.items():
+            with self.subTest(runner=runner):
+                dry = self.run_cli(
+                    "run",
+                    "--runner",
+                    runner,
+                    "--effort",
+                    "high",
+                    "--workspace",
+                    str(self.workspace),
+                    "--prompt",
+                    "effort preview",
+                    "--dry-run",
+                    "--json",
+                )
+                self.assertEqual(dry.returncode, 0, msg=dry.stderr)
+                payload = json.loads(dry.stdout)
+                self.assertEqual((payload["effort"], payload["effort_source"]), ("high", "flag"))
+                self.assertIn(
+                    expected,
+                    [payload["command"][i:i + 2] for i in range(len(payload["command"]) - 1)],
+                )
+
+        self.assertEqual(self.run_cli("config", "--set-effort", "codex=xhigh").returncode, 0)
+        cfg_dry = json.loads(
+            self.run_cli(
+                "run", "--runner", "codex", "--workspace", str(self.workspace),
+                "--prompt", "x", "--dry-run", "--json",
+            ).stdout
+        )
+        self.assertEqual((cfg_dry["effort"], cfg_dry["effort_source"]), ("xhigh", "config"))
+        self.assertIn('model_reasoning_effort="xhigh"', cfg_dry["command"])
+        self.assertEqual(self.run_cli("config", "--set-effort", "codex=default").returncode, 0)
+
+        for unsupported in ("dsh", "kimi", "cursor"):
+            with self.subTest(unsupported_effort=unsupported):
+                self.assertEqual(self.run_cli("config", "--set-effort", f"{unsupported}=high").returncode, 1)
+                mode = "write" if unsupported == "kimi" else "read"
+                rejected = self.run_cli(
+                    "run", "--runner", unsupported, "--effort", "high", "--mode", mode,
+                    "--workspace", str(self.workspace), "--prompt", "x", "--dry-run",
+                )
+                self.assertEqual(rejected.returncode, 1)
+                self.assertIn("--effort", rejected.stderr)
+
+    def test_models_subcommand_for_all_nine_runners(self) -> None:
+        self.run_cli("config", "--set-model", "agy=gemini-4-carbon-high")
+        agy = self.run_cli("models", "--runner", "agy", "--json")
+        self.assertEqual(agy.returncode, 0, msg=agy.stderr)
+        agy_payload = json.loads(agy.stdout)
+        self.assertEqual(agy_payload["status"], "OK")
+        self.assertEqual(agy_payload["runner"], "antigravity")
+        self.assertTrue(agy_payload["list_supported"])
+        self.assertEqual(agy_payload["configured_model"], "gemini-4-carbon-high")
+        self.assertEqual(
+            agy_payload["models"],
+            [
+                {"id": "gemini-4-carbon-medium", "label": "Gemini 4 Carbon (Medium)"},
+                {"id": "gemini-4-carbon-high", "label": "Gemini 4 Carbon (High)"},
+            ],
+        )
+
+        agy_text = self.run_cli("models", "--runner", "antigravity")
+        self.assertEqual(agy_text.returncode, 0, msg=agy_text.stderr)
+        self.assertIn("model=gemini-4-carbon-high\tGemini 4 Carbon (High)", agy_text.stdout)
+
+        grok_payload = json.loads(self.run_cli("models", "--runner", "grok", "--json").stdout)
+        self.assertEqual(grok_payload["cli_default_model"], "grok-4.6")
+        self.assertEqual([m["id"] for m in grok_payload["models"]], ["grok-4.6", "grok-4.5"])
+        self.assertTrue(grok_payload["models"][0]["is_default"])
+
+        opencode_payload = json.loads(self.run_cli("models", "--runner", "opencode", "--json").stdout)
+        self.assertEqual([m["id"] for m in opencode_payload["models"]], ["anthropic/claude-sonnet-4-5", "openai/gpt-5"])
+
+        cursor_payload = json.loads(self.run_cli("models", "--runner", "cursor-cli", "--json").stdout)
+        self.assertEqual([m["id"] for m in cursor_payload["models"]], ["gpt-5", "sonnet-4-thinking"])
+
+        cursor_empty = json.loads(
+            self.run_cli("models", "--runner", "cursor", "--json", extra_env={"FAKE_CURSOR_NO_MODELS": "1"}).stdout
+        )
+        self.assertEqual(cursor_empty["status"], "OK")
+        self.assertEqual(cursor_empty["models"], [])
+        self.assertIn("No models available", cursor_empty["note"])
+
+        failed_list = self.run_cli("models", "--runner", "agy", "--json", extra_env={"FAKE_MODELS_FAIL": "1"})
+        self.assertEqual(failed_list.returncode, 1)
+        self.assertEqual(json.loads(failed_list.stdout)["status"], "ERROR")
+
+        missing_bin = self.run_cli(
+            "models", "--runner", "opencode", "--json", remove_env=["OIL_DELEGATE_OPENCODE_BIN"]
+        )
+        self.assertEqual(missing_bin.returncode, 1)
+
+        call_log = self.root / "models_calls.jsonl"
+        for runner in ("claude", "workbuddy", "codex", "kimi"):
+            with self.subTest(no_list_runner=runner):
+                proc = self.run_cli("models", "--runner", runner, "--json", extra_env={"FAKE_CALL_LOG": str(call_log)})
+                self.assertEqual(proc.returncode, 0, msg=proc.stderr)
+                payload = json.loads(proc.stdout)
+                self.assertEqual(payload["status"], "NO_MODEL_LIST_COMMAND")
+                self.assertTrue(payload["supports_model_flag"])
+                self.assertFalse(payload["list_supported"])
+                self.assertEqual(payload["models"], [])
+                self.assertTrue(payload["docs_url"].startswith("https://"))
+                self.assertTrue(payload["hint"])
+        self.assertFalse(call_log.exists())
+
+        dsh_models = json.loads(self.run_cli("models", "--runner", "deepseek", "--json").stdout)
+        self.assertEqual(dsh_models["status"], "MODEL_FLAG_UNSUPPORTED")
+        self.assertFalse(dsh_models["supports_model_flag"])
+        self.assertFalse(dsh_models["list_supported"])
+        self.assertEqual(dsh_models["models"], [])
+        self.assertTrue(dsh_models["docs_url"].startswith("https://"))
 
 
 if __name__ == "__main__":

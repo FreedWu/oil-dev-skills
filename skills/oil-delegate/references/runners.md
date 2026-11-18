@@ -20,7 +20,9 @@
 
 正式 Runner 名为 `claude`、`workbuddy`、`antigravity`、`codex`、`opencode`、`dsh`、`grok`、`kimi`、`cursor`。别名包括 `cc/claude-code`、`wb/codebuddy/cbc`、`agy/anti`、`deepseek/deepseek-harness`、`grok-build`、`kimi-code`、`cursor-agent/cursor-cli`。名称不区分大小写；启用、默认 Runner、单次委托和二进制路径配置都使用同一套别名解析，保存时统一转为正式 Runner 名。
 
-优先级：环境变量 `OIL_DELEGATE_<RUNNER>_BIN` → 配置中的 runner path → PATH → 已知安装目录。所有调用使用 argv 数组，prompt 不经过 shell。常规调用不指定模型、provider 或思考强度。
+优先级：环境变量 `OIL_DELEGATE_<RUNNER>_BIN` → 配置中的 runner path → PATH → 已知安装目录。所有调用使用 argv 数组，prompt 不经过 shell。常规调用不切换 provider；模型与思考强度按 `--model` / `--effort` → `config` 保存的 `runner_models` / `runner_efforts` → CLI 自身默认的优先级生效。不支持对应 CLI 参数的 Runner 在传入时直接报错拒绝，不静默忽略。
+
+`models --runner <runner>` 对自带非交互列表命令的 CLI（`antigravity`、`grok`、`opencode`、`cursor`）直接执行并解析真实模型 ID；其余 CLI 返回 `NO_MODEL_LIST_COMMAND`（`dsh` 返回 `MODEL_FLAG_UNSUPPORTED`）及官方入口，不编造静态模型列表。
 
 省略 `--mode` 时默认 `write`，使用各 CLI 的最高可用权限，尽量避免无人值守任务停在常规审批。只有用户明确要求只读、plan 或限制权限时才使用 `read`。权限参数只影响当前进程，不修改目标 CLI 的永久配置。
 
@@ -30,6 +32,7 @@
 
 - 发现：`claude`。
 - 新建：`claude -p <prompt> --output-format json`；续接增加 `--resume <session_id>`。
+- 模型与思考强度：`--model <model>`（支持 `opus`、`sonnet`、`haiku` 等别名或完整模型 ID，新建与 `--resume` 续接均生效）；`--effort <level>`（`low|medium|high|xhigh|max`）。无非交互列模型子命令（交互式可用 `/model` 查看）。
 - read：`--permission-mode plan --permission-prompts none`。
 - write：`--dangerously-skip-permissions`。
 - 解析：最终 JSON 的 `session_id`、`result`、`is_error`。
@@ -41,6 +44,7 @@
 
 - 发现：PATH 中的 `codebuddy` 或 `cbc`；macOS 还检测 WorkBuddy App 的 `Contents/Resources/app.asar.unpacked/cli/bin/codebuddy`。Runner 名仍为 `workbuddy`。
 - 新建：`codebuddy -p <prompt> --output-format json`；续接增加 `--resume <session_id>`。
+- 模型与思考强度：`--model <model>`（新建与 `--resume` 续接均生效）；`--effort <level>`（`minimal|low|medium|high|xhigh|max`）。无独立 `models` 子命令（可查交互式 `/model` 或 `codebuddy --help`）。
 - read：`--permission-mode plan -y`。`-y` 让读取等常规授权可无人值守，plan 限制实施修改。
 - write：`--permission-mode bypassPermissions -y`，并设置 `CODEBUDDY_IS_SANDBOX=1`，同时放行 HIGH/CRITICAL 操作。这是用户选择的最高权限模式，不代表进程实际处于隔离沙箱。
 - 进程环境：所有模式设置 `CODEBUDDY_CODE_DISABLE_BACKGROUND_TASKS=1`，避免 single-shot 模式不支持的后台任务。
@@ -53,6 +57,7 @@
 
 - 发现：`agy`，Runner 名为 `antigravity`，接受 `agy`、`anti`。
 - 新建：`agy -p <prompt> --output-format json`；续接增加 `--conversation <conversation_id>`。
+- 模型与思考强度：`--model <model>`（新建与 `--conversation` 续接均生效）；`--effort <level>`（`low|medium|high|xhigh|max`）。`models --runner agy` 调用 `agy models` 解析模型 ID 与显示名（如 `gemini-4-carbon-high` 已包含档位后缀，通常直接传 `--model` 即可）。
 - read：`--mode plan`。
 - write：`--dangerously-skip-permissions`。
 - 解析：`conversation_id`、`response`、`status`；只有 `SUCCESS` 可视为协议成功。
@@ -64,6 +69,7 @@
 
 - 发现：macOS 优先检测 ChatGPT App 内置的 `Contents/Resources/codex-cli/bin/codex`（`/Applications` 与 `~/Applications`），不存在时回退到 `codex`（仍可通过 `OIL_DELEGATE_CODEX_BIN` 或 `config --set-bin codex=...` 覆盖）。
 - 新建：`codex exec --cd <workspace> --json --skip-git-repo-check ... -`，prompt 从 stdin 传入。
+- 模型与思考强度：`--model <model>`（`codex exec` 新建与 `codex exec resume` 续接均支持，置于 `<thread_id> -` 之前）；思考强度通过 `-c model_reasoning_effort="<level>"` 透传。无非交互 `models` 子命令（交互式可用 `/model` 查看）。
 - read：新会话使用 `--sandbox read-only`；续接使用 `-c sandbox_mode="read-only"`。
 - write：`--dangerously-bypass-approvals-and-sandbox`。
 - 续接：`codex exec resume --json ... <thread_id> -`，read 续接保留只读沙箱，write 续接使用最高权限。
@@ -76,6 +82,7 @@
 
 - 发现：`opencode`，也可用 `OIL_DELEGATE_OPENCODE_BIN` 指向受信任 sidecar。
 - 新建：`opencode run --format json --dir <workspace> <prompt>`；续接增加 `--session <session_id>`。
+- 模型与思考强度：`--model <provider/model>`（新建与 `--session` 续接均生效，需包含 `provider/` 前缀）；思考强度/变体通过 `--variant <value>` 透传。`models --runner opencode` 调用 `opencode models` 列出可用 `provider/model`。
 - read：增加 `--agent plan`，并设置进程级 `OPENCODE_PERMISSION`，禁止 edit、bash、external_directory 和 question。
 - write：进程级权限允许 edit、bash 和 external_directory；question 仍拒绝，避免无交互任务等待用户。该方式不依赖新版才有的 `--auto`，同时适用于 1.3.9。
 - 解析：事件及其 `part` 中的 `sessionID/sessionId/session_id`；连接 text 事件的 `part.text`，读取 error 事件。
@@ -87,6 +94,7 @@
 
 - 发现：`dsh`，Runner 名为 `dsh`。
 - 新建：`dsh --profile headless --json -`，prompt 从 stdin 传入；续接增加 `--session-id <sessionId>`。
+- 模型与思考强度：不支持 CLI 参数。`dsh --profile headless` 只接受 `--json`、`--session-id` 与 `--help`，模型与 `reasoningEffort` 由 `$DSH_HOME/profiles/headless/cordis.patch.yml` 中的 `@deepseek-ai/dsh-agent-default-model`（需同时指定 `provider` 与 `model`）控制；传入 `--model`、`--effort` 或保存 `dsh` 默认模型时明确报错拒绝。无 `models` 子命令。
 - read：支持新 flags 时使用 `--permission-mode read-only`；否则设置进程环境 `DSH_PERMISSION_MODE=read-only`。
 - write：使用 `--permission-mode danger-full-access` 或同名环境变量回退，不再限制为 workspace-write。支持时增加 `--approval-policy never`。
 - 能力探测：onboarding 执行 `dsh --profile headless --help`，分别检查 `--json`、`--session-id`、`--permission-mode`、`--approval-policy`。缺少 JSON 时不接受任务，缺少 session flag 时不接受续接。
@@ -100,6 +108,7 @@
 
 - 发现：`grok`，Runner 名为 `grok`，接受 `grok-build`。
 - 新建：`grok --cwd <workspace> -p <prompt> --output-format json`；续接增加 `--resume <sessionId>`。`--session-id` 只用于新建指定 UUID，不用于续接。
+- 模型与思考强度：`--model <model>`（新建与 `--resume` 续接均生效）；`--effort <level>`（`--reasoning-effort` 的别名）。`models --runner grok` 调用 `grok models` 解析可用模型与默认项。
 - read：`--permission-mode plan`。
 - write：`--always-approve`，自动批准编辑和命令；deny rules、hooks 和 admin locks 仍然有效。
 - 解析：最终 JSON 的 `sessionId`、`text`、`stopReason`；错误对象使用 `type/message`。
@@ -111,6 +120,7 @@
 
 - 发现：`kimi`，Runner 名为 `kimi`，接受 `kimi-code`。
 - 新建：`kimi -p <prompt> --output-format stream-json`；续接增加 `-S <session_id>`。
+- 模型与思考强度：`--model <model>`（传入 `config.toml` 中的模型别名，新建与 `-S` 续接均生效）；非交互模式不支持 `--effort`（`/effort` 仅限交互式 TUI，传入 `--effort` 时报错拒绝）。无非交互列模型子命令（不调用 `kimi provider list --json`，避免触碰含密钥的原始配置）。
 - write：`-p` 自身已经使用 auto 权限，不再添加 `--auto`。官方明确禁止 `-p` 与 `--auto`、`--yolo` 或 `--plan` 同用。
 - read：不支持。非交互模式自带 auto 权限，无法保证只读；收到 read 请求时明确拒绝，不伪装成 plan。
 - 解析：assistant 的文本 content 和 `session.resume_hint.session_id`；同时兼容事件中的 session 字段与 error。
@@ -122,6 +132,7 @@
 
 - 发现：`cursor-agent`，Runner 名为 `cursor`，接受 `cursor-agent`、`cursor-cli`。不直接匹配 `cursor` 编辑器命令或通用 `agent`，避免误命中 Cursor IDE 启动器或其他同名 CLI。
 - 新建：`cursor-agent -p --output-format json --workspace <workspace> --trust ...`，prompt 从 stdin 传入；续接增加 `--resume <session_id>`。
+- 模型与思考强度：`--model <model>`（如 `gpt-5`、`sonnet-4`、`sonnet-4-thinking`，新建与 `--resume` 续接均生效）；无独立 `--effort` 参数（思考模式体现在 `-thinking` 模型 ID 中，传入 `--effort` 时报错拒绝）。`models --runner cursor` 调用 `cursor-agent --list-models` 解析当前账号可用模型。
 - read：`--mode plan`（配合 `--trust` 免交互信任工作区，不加 `--force`）。
 - write：`--force`（配合 `--trust`，自动放行文件修改与命令执行；静态 deny 规则、hooks 与团队安全策略仍然有效）。
 - 解析：最终 JSON 的 `session_id`、`result`、`is_error` 与 `subtype`；已知 `subtype` 不是 `success` 时判为失败。

@@ -5,6 +5,7 @@ import argparse
 import datetime as dt
 import json
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -104,6 +105,62 @@ ROLE_DESCRIPTIONS = {
 ROLE_SLOTS = {"diagnose": 2}
 HOST_AGENT = "host"
 READ_ONLY_UNSUPPORTED = {"kimi"}
+MODEL_UNSUPPORTED = {
+    "dsh": (
+        "DeepSeek Harness (dsh) headless profile does not accept a CLI --model flag; "
+        "configure @deepseek-ai/dsh-agent-default-model in $DSH_HOME/profiles/headless/cordis.patch.yml instead"
+    ),
+}
+EFFORT_UNSUPPORTED = {
+    "dsh": (
+        "DeepSeek Harness (dsh) headless profile does not accept a CLI --effort flag; "
+        "configure reasoningEffort on @deepseek-ai/dsh-agent-default-model in $DSH_HOME/profiles/headless/cordis.patch.yml instead"
+    ),
+    "kimi": (
+        "Kimi Code CLI non-interactive mode does not accept an --effort flag; "
+        "thinking effort can only be changed with /effort in the interactive TUI"
+    ),
+    "cursor": (
+        "Cursor CLI (cursor-agent) does not accept an --effort flag; "
+        "select a thinking model ID (e.g. sonnet-4-thinking) with --model instead"
+    ),
+}
+RUNNER_DOCS_URLS = {
+    "claude": "https://docs.anthropic.com/en/docs/claude-code/cli-usage",
+    "workbuddy": "https://www.workbuddy.ai/docs/cli/headless",
+    "antigravity": "https://antigravity.google/docs/cli/headless/",
+    "codex": "https://github.com/openai/codex",
+    "opencode": "https://opencode.ai/docs/cli/",
+    "dsh": "https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/bundle/headless/README.md",
+    "grok": "https://github.com/xai-org/grok-build/blob/main/crates/codegen/xai-grok-pager/docs/user-guide/14-headless-mode.md",
+    "kimi": "https://www.kimi.com/code/docs/en/kimi-code-cli/reference/kimi-command.html",
+    "cursor": "https://cursor.com/docs/cli/headless",
+}
+NATIVE_MODELS_COMMANDS: dict[str, tuple[str, ...]] = {
+    "antigravity": ("models",),
+    "grok": ("models",),
+    "opencode": ("models",),
+    "cursor": ("--list-models",),
+}
+NO_MODEL_LIST_HINTS = {
+    "claude": (
+        "Claude Code CLI has no 'models' subcommand. Pass an alias (e.g. opus, sonnet, haiku) "
+        "or full model ID with --model; check '/model' in interactive claude or the official docs."
+    ),
+    "workbuddy": (
+        "WorkBuddy (codebuddy) CLI has no 'models' subcommand. Pass an exact model ID with --model; "
+        "check 'codebuddy --help', '/model' in interactive TUI, or the official docs."
+    ),
+    "codex": (
+        "Codex CLI has no 'models' subcommand. Pass an exact model ID with --model; "
+        "check '/model' in interactive codex or the official docs."
+    ),
+    "kimi": (
+        "Kimi Code CLI has no 'models' subcommand. Pass a configured model alias with --model; "
+        "check '/model' in interactive kimi or the official docs."
+    ),
+}
+ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
 DEFAULT_RUN_TIMEOUT = 3600
 
 
@@ -122,6 +179,8 @@ def default_config() -> dict[str, Any]:
         "enabled_runners": [],
         "default_runner": None,
         "runner_paths": {},
+        "runner_models": {},
+        "runner_efforts": {},
         "roles": {},
     }
 
@@ -148,6 +207,10 @@ def load_config(state_dir: Path) -> dict[str, Any]:
         raise DelegateError("config.enabled_runners must be a list")
     if not isinstance(merged.get("runner_paths"), dict):
         raise DelegateError("config.runner_paths must be an object")
+    if not isinstance(merged.get("runner_models"), dict):
+        raise DelegateError("config.runner_models must be an object")
+    if not isinstance(merged.get("runner_efforts"), dict):
+        raise DelegateError("config.runner_efforts must be an object")
     if not isinstance(merged.get("roles"), dict):
         raise DelegateError("config.roles must be an object")
     return merged
@@ -361,6 +424,8 @@ def onboarding_payload(state_dir: Path, config: dict[str, Any]) -> dict[str, Any
         "state_dir": str(state_dir),
         "enabled_runners": config.get("enabled_runners", []),
         "default_runner": config.get("default_runner"),
+        "runner_models": config.get("runner_models", {}),
+        "runner_efforts": config.get("runner_efforts", {}),
         "roles": config.get("roles", {}),
         "installed_runners": [name for name, info in detected.items() if info["installed"]],
         "detected_runners": detected,
@@ -536,6 +601,8 @@ def config_view_payload(state_dir: Path, config: dict[str, Any]) -> dict[str, An
         "enabled_runners": config.get("enabled_runners", []),
         "default_runner": config.get("default_runner"),
         "runner_paths": config.get("runner_paths", {}),
+        "runner_models": config.get("runner_models", {}),
+        "runner_efforts": config.get("runner_efforts", {}),
         "roles": config.get("roles", {}),
         "role_names": list(ROLE_MODES),
     }
@@ -566,6 +633,32 @@ def parse_bin_assignment(value: str) -> tuple[str, str]:
     return runner, path.strip()
 
 
+def apply_runner_setting(
+    config: dict[str, Any],
+    assignment: str,
+    *,
+    config_key: str,
+    flag_name: str,
+    unsupported_map: dict[str, str],
+) -> None:
+    if "=" not in assignment:
+        raise DelegateError(f"{flag_name} expects RUNNER=<value|default>")
+    runner_raw, raw_value = assignment.split("=", 1)
+    runner = canonical_runner(runner_raw)
+    value = raw_value.strip()
+    if not value:
+        raise DelegateError(f"{flag_name} requires a non-empty value, or 'default' to clear")
+    stored = dict(config.get(config_key, {}))
+    if value.lower() == "default":
+        stored.pop(runner, None)
+        config[config_key] = stored
+        return
+    if runner in unsupported_map:
+        raise DelegateError(unsupported_map[runner])
+    stored[runner] = value
+    config[config_key] = stored
+
+
 def cmd_config(args: argparse.Namespace, state_dir: Path) -> int:
     config = load_config(state_dir)
     changed = any(
@@ -574,6 +667,8 @@ def cmd_config(args: argparse.Namespace, state_dir: Path) -> int:
             args.set_default_runner is not None,
             bool(args.set_bin),
             bool(args.clear_bin),
+            bool(args.set_model),
+            bool(args.set_effort),
             bool(args.set_role),
         )
     )
@@ -594,6 +689,24 @@ def cmd_config(args: argparse.Namespace, state_dir: Path) -> int:
             del paths[runner]
             config["runner_paths"] = paths
 
+    for assignment in args.set_model or []:
+        apply_runner_setting(
+            config,
+            assignment,
+            config_key="runner_models",
+            flag_name="--set-model",
+            unsupported_map=MODEL_UNSUPPORTED,
+        )
+
+    for assignment in args.set_effort or []:
+        apply_runner_setting(
+            config,
+            assignment,
+            config_key="runner_efforts",
+            flag_name="--set-effort",
+            unsupported_map=EFFORT_UNSUPPORTED,
+        )
+
     if args.set_enabled_runners is not None:
         apply_enabled_runners(config, args.set_enabled_runners)
     if args.set_default_runner is not None:
@@ -610,6 +723,184 @@ def cmd_config(args: argparse.Namespace, state_dir: Path) -> int:
     if warnings:
         payload["warnings"] = warnings
     print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0
+
+
+def resolve_runner_setting(
+    runner: str,
+    explicit: str | None,
+    configured_map: dict[str, Any],
+    unsupported_map: dict[str, str],
+    flag_name: str,
+) -> tuple[str | None, str]:
+    if explicit is not None:
+        value = explicit.strip()
+        if not value:
+            raise DelegateError(f"{flag_name} requires a non-empty value")
+        source = "flag"
+    else:
+        raw_cfg = configured_map.get(runner)
+        value = raw_cfg.strip() if isinstance(raw_cfg, str) and raw_cfg.strip() else None
+        source = "config" if value else "cli-default"
+    if value is not None and runner in unsupported_map:
+        raise DelegateError(unsupported_map[runner])
+    return value, source
+
+
+def parse_models_output(runner: str, stdout: str) -> tuple[list[dict[str, Any]], str | None, str | None]:
+    models: list[dict[str, Any]] = []
+    cli_default: str | None = None
+    notes: list[str] = []
+
+    for raw_line in stdout.splitlines():
+        clean = ANSI_ESCAPE_RE.sub("", raw_line).strip()
+        if not clean:
+            continue
+        lower = clean.lower()
+        default_match = re.match(r"^default\s+model:\s*(\S+)\s*$", clean, re.IGNORECASE)
+        if default_match:
+            cli_default = default_match.group(1)
+            continue
+        if lower.startswith(("fetching ", "loading ")) or clean.endswith(":"):
+            continue
+        if lower.startswith(("no models available", "you are not authenticated", "not authenticated", "not logged in")):
+            notes.append(clean)
+            continue
+
+        if runner in ("antigravity", "opencode"):
+            if "\t" in clean:
+                mid, label = clean.split("\t", 1)
+            else:
+                parts = re.split(r"\s{2,}", clean, maxsplit=1)
+                mid = parts[0]
+                label = parts[1] if len(parts) > 1 else None
+            mid = mid.strip()
+            if mid and not any(ch.isspace() for ch in mid):
+                models.append({"id": mid, "label": label.strip() if label and label.strip() else None})
+            continue
+
+        bullet_match = re.match(r"^([*-])\s+(.+)$", clean)
+        bullet = bullet_match.group(1) if bullet_match else None
+        body = bullet_match.group(2).strip() if bullet_match else clean
+        stripped = re.sub(r"\s*[\(\[]default[\)\]]\s*$", "", body, flags=re.IGNORECASE).strip()
+        is_default = (stripped != body) or (bullet == "*")
+        body = stripped
+
+        if "\t" in body:
+            mid, label = body.split("\t", 1)
+        elif " - " in body:
+            mid, label = body.split(" - ", 1)
+        else:
+            parts = re.split(r"\s{2,}", body, maxsplit=1)
+            mid = parts[0]
+            label = parts[1] if len(parts) > 1 else None
+
+        mid = mid.strip()
+        if not mid or any(ch.isspace() for ch in mid) or mid.endswith("."):
+            continue
+        if is_default and not cli_default:
+            cli_default = mid
+        entry: dict[str, Any] = {
+            "id": mid,
+            "label": label.strip() if label and label.strip() else None,
+        }
+        if is_default or (cli_default and mid == cli_default):
+            entry["is_default"] = True
+        models.append(entry)
+
+    note = "; ".join(notes) if notes else None
+    if not models and not note:
+        note = f"CLI returned no models; verify authentication or check {RUNNER_DOCS_URLS[runner]}"
+    return models, cli_default, note
+
+
+def cmd_models(args: argparse.Namespace, state_dir: Path) -> int:
+    config = load_config(state_dir)
+    runner = canonical_runner(args.runner)
+    configured_raw = (config.get("runner_models") or {}).get(runner)
+    configured_model = configured_raw.strip() if isinstance(configured_raw, str) and configured_raw.strip() else None
+
+    if runner in MODEL_UNSUPPORTED:
+        payload: dict[str, Any] = {
+            "status": "MODEL_FLAG_UNSUPPORTED",
+            "runner": runner,
+            "supports_model_flag": False,
+            "list_supported": False,
+            "configured_model": None,
+            "cli_default_model": None,
+            "command": None,
+            "models": [],
+            "docs_url": RUNNER_DOCS_URLS[runner],
+            "hint": MODEL_UNSUPPORTED[runner],
+        }
+    elif runner not in NATIVE_MODELS_COMMANDS:
+        payload = {
+            "status": "NO_MODEL_LIST_COMMAND",
+            "runner": runner,
+            "supports_model_flag": True,
+            "list_supported": False,
+            "configured_model": configured_model,
+            "cli_default_model": None,
+            "command": None,
+            "models": [],
+            "docs_url": RUNNER_DOCS_URLS[runner],
+            "hint": NO_MODEL_LIST_HINTS[runner],
+        }
+    else:
+        binary_info = detect_binary(runner, config)
+        if not binary_info["installed"]:
+            raise DelegateError(binary_info["error"] or f"Runner not installed: {runner}")
+        command = [binary_info["path"], *NATIVE_MODELS_COMMANDS[runner]]
+        try:
+            proc = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise DelegateError(f"Failed to list models for '{runner}': {exc}") from exc
+        if proc.returncode != 0:
+            detail = (proc.stderr or proc.stdout or "").strip()[-1000:]
+            suffix = f": {detail}" if detail else ""
+            raise DelegateError(
+                f"Model list command for '{runner}' exited with code {proc.returncode}{suffix}"
+            )
+        models, cli_default, note = parse_models_output(runner, proc.stdout or "")
+        payload = {
+            "status": "OK",
+            "runner": runner,
+            "supports_model_flag": True,
+            "list_supported": True,
+            "configured_model": configured_model,
+            "cli_default_model": cli_default,
+            "command": command,
+            "models": models,
+            "docs_url": RUNNER_DOCS_URLS[runner],
+        }
+        if note:
+            payload["note"] = note
+
+    if args.json:
+        emit(payload)
+        return 0
+
+    print(f"status={payload['status']}")
+    print(f"runner={runner}")
+    print(f"supports_model_flag={str(payload['supports_model_flag']).lower()}")
+    print(f"list_supported={str(payload['list_supported']).lower()}")
+    print(f"configured_model={payload['configured_model'] or ''}")
+    if payload.get("cli_default_model"):
+        print(f"cli_default_model={payload['cli_default_model']}")
+    print(f"docs_url={payload['docs_url']}")
+    if payload.get("hint"):
+        print(f"hint={payload['hint']}")
+    if payload.get("note"):
+        print(f"note={payload['note']}")
+    for item in payload["models"]:
+        suffix = f"\t{item['label']}" if item.get("label") else ""
+        print(f"model={item['id']}{suffix}")
     return 0
 
 
@@ -657,14 +948,24 @@ def build_invocation(
     session_id: str | None,
     mode: str,
     dsh_capabilities: dict[str, Any] | None,
+    model: str | None = None,
+    effort: str | None = None,
 ) -> tuple[list[str], str | None, dict[str, str]]:
     env: dict[str, str] = {}
     stdin_input: str | None = None
+    if model is not None and runner in MODEL_UNSUPPORTED:
+        raise DelegateError(MODEL_UNSUPPORTED[runner])
+    if effort is not None and runner in EFFORT_UNSUPPORTED:
+        raise DelegateError(EFFORT_UNSUPPORTED[runner])
 
     if runner == "claude":
         cmd = [binary]
         if session_id:
             cmd.extend(["--resume", session_id])
+        if model:
+            cmd.extend(["--model", model])
+        if effort:
+            cmd.extend(["--effort", effort])
         cmd.extend(["-p", prompt, "--output-format", "json"])
         cmd.extend(
             ["--permission-mode", "plan", "--permission-prompts", "none"]
@@ -677,6 +978,10 @@ def build_invocation(
         cmd = [binary]
         if session_id:
             cmd.extend(["--resume", session_id])
+        if model:
+            cmd.extend(["--model", model])
+        if effort:
+            cmd.extend(["--effort", effort])
         cmd.extend(["-p", prompt, "--output-format", "json"])
         cmd.extend(
             ["--permission-mode", "plan", "-y"]
@@ -692,25 +997,57 @@ def build_invocation(
         cmd = [binary]
         if session_id:
             cmd.extend(["--conversation", session_id])
+        if model:
+            cmd.extend(["--model", model])
+        if effort:
+            cmd.extend(["--effort", effort])
         cmd.extend(["-p", prompt, "--output-format", "json"])
         cmd.extend(["--mode", "plan"] if mode == "read" else ["--dangerously-skip-permissions"])
         return cmd, stdin_input, env
 
     if runner == "codex":
+        model_args = ["--model", model] if model else []
+        effort_args = ["-c", f"model_reasoning_effort={json.dumps(effort)}"] if effort else []
         if mode == "read":
             permission = ["-c", 'sandbox_mode="read-only"'] if session_id else ["--sandbox", "read-only"]
         else:
             permission = ["--dangerously-bypass-approvals-and-sandbox"]
         if session_id:
-            cmd = [binary, "exec", "resume", "--json", "--skip-git-repo-check", *permission, session_id, "-"]
+            cmd = [
+                binary,
+                "exec",
+                "resume",
+                "--json",
+                "--skip-git-repo-check",
+                *model_args,
+                *effort_args,
+                *permission,
+                session_id,
+                "-",
+            ]
         else:
-            cmd = [binary, "exec", "--cd", str(workspace), "--json", "--skip-git-repo-check", *permission, "-"]
+            cmd = [
+                binary,
+                "exec",
+                "--cd",
+                str(workspace),
+                "--json",
+                "--skip-git-repo-check",
+                *model_args,
+                *effort_args,
+                *permission,
+                "-",
+            ]
         return cmd, prompt, env
 
     if runner == "grok":
         cmd = [binary, "--cwd", str(workspace)]
         if session_id:
             cmd.extend(["--resume", session_id])
+        if model:
+            cmd.extend(["--model", model])
+        if effort:
+            cmd.extend(["--effort", effort])
         cmd.extend(["-p", prompt, "--output-format", "json"])
         cmd.extend(["--permission-mode", "plan"] if mode == "read" else ["--always-approve"])
         return cmd, stdin_input, env
@@ -723,6 +1060,8 @@ def build_invocation(
         cmd = [binary]
         if session_id:
             cmd.extend(["-S", session_id])
+        if model:
+            cmd.extend(["--model", model])
         cmd.extend(["-p", prompt, "--output-format", "stream-json"])
         return cmd, stdin_input, env
 
@@ -730,6 +1069,10 @@ def build_invocation(
         cmd = [binary, "run", "--format", "json", "--dir", str(workspace)]
         if session_id:
             cmd.extend(["--session", session_id])
+        if model:
+            cmd.extend(["--model", model])
+        if effort:
+            cmd.extend(["--variant", effort])
         if mode == "read":
             cmd.extend(["--agent", "plan"])
         cmd.append(prompt)
@@ -766,6 +1109,8 @@ def build_invocation(
         cmd = [binary, "-p", "--output-format", "json", "--workspace", str(workspace), "--trust"]
         if session_id:
             cmd.extend(["--resume", session_id])
+        if model:
+            cmd.extend(["--model", model])
         cmd.extend(["--mode", "plan"] if mode == "read" else ["--force"])
         return cmd, prompt, env
 
@@ -1044,6 +1389,20 @@ def execute_run(
     workspace = resolve_workspace(args.workspace)
     if args.timeout <= 0:
         raise DelegateError("--timeout must be greater than zero")
+    model, model_source = resolve_runner_setting(
+        runner,
+        getattr(args, "model", None),
+        config.get("runner_models") or {},
+        MODEL_UNSUPPORTED,
+        "--model",
+    )
+    effort, effort_source = resolve_runner_setting(
+        runner,
+        getattr(args, "effort", None),
+        config.get("runner_efforts") or {},
+        EFFORT_UNSUPPORTED,
+        "--effort",
+    )
     prompt = compose_prompt(args.prompt, workspace, args.mode, args.file or [])
     binary_info = detect_binary(runner, config)
     if not binary_info["installed"]:
@@ -1057,6 +1416,8 @@ def execute_run(
         args.session,
         args.mode,
         capabilities,
+        model=model,
+        effort=effort,
     )
     safe_command = redact_command(command, prompt)
 
@@ -1065,6 +1426,10 @@ def execute_run(
             "status": "DRY_RUN",
             "runner": runner,
             "role": getattr(args, "resolved_role", None),
+            "model": model,
+            "model_source": model_source,
+            "effort": effort,
+            "effort_source": effort_source,
             "workspace": str(workspace),
             "mode": args.mode,
             "session_id": args.session,
@@ -1147,6 +1512,10 @@ def execute_run(
         "exit_code": exit_code,
         "runner": runner,
         "role": getattr(args, "resolved_role", None),
+        "model": model,
+        "model_source": model_source,
+        "effort": effort,
+        "effort_source": effort_source,
         "workspace": str(workspace),
         "mode": args.mode,
         "resume_command": resume_command(
@@ -1178,6 +1547,10 @@ def execute_run(
     print(f"status={parsed['status']}")
     print(f"session_id={parsed['session_id'] or ''}")
     print(f"runner={runner}")
+    print(f"model={model or ''}")
+    print(f"model_source={model_source}")
+    print(f"effort={effort or ''}")
+    print(f"effort_source={effort_source}")
     print(f"output_path={paths['output']}")
     print(f"result_path={paths['result']}")
     print(f"events_path={paths['events']}")
@@ -1238,14 +1611,34 @@ def build_parser() -> argparse.ArgumentParser:
     config.add_argument("--set-bin", action="append", help="RUNNER=/path/to/executable")
     config.add_argument("--clear-bin", action="append", help="Runner whose configured path should be cleared")
     config.add_argument(
+        "--set-model",
+        action="append",
+        help="RUNNER=<model|default>; save default model for a runner, or 'default' to clear",
+    )
+    config.add_argument(
+        "--set-effort",
+        action="append",
+        help="RUNNER=<effort|default>; save default reasoning effort for a runner, or 'default' to clear",
+    )
+    config.add_argument(
         "--set-role",
         action="append",
         help="ROLE=<runner|host|ask>; roles: review, critique, diagnose (two choices), implement",
     )
 
+    models = sub.add_parser("models", help="List available model IDs for a runner")
+    models.add_argument("--runner", required=True, help="Runner name or alias")
+    models.add_argument(
+        "--json",
+        action="store_true",
+        help="Print one JSON object instead of key=value lines",
+    )
+
     run = sub.add_parser("run", help="Run or resume one delegated task")
     run.add_argument("--prompt", required=True)
     run.add_argument("--runner")
+    run.add_argument("--model", help="Model ID or alias for this run; overrides saved runner default")
+    run.add_argument("--effort", help="Reasoning effort or variant for this run; overrides saved runner default")
     run.add_argument("--workspace", default=os.getcwd())
     run.add_argument("--mode", choices=("read", "write"), help="Defaults to write, or to the role's mode")
     run.add_argument("--role", help="review, critique, diagnose or implement; picks the saved agent and mode")
@@ -1271,6 +1664,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_onboard(args, state_dir)
         if args.command == "config":
             return cmd_config(args, state_dir)
+        if args.command == "models":
+            return cmd_models(args, state_dir)
         if args.command == "run":
             return cmd_run(args, state_dir)
         raise DelegateError(f"Unknown command: {args.command}")
