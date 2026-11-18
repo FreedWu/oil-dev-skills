@@ -191,6 +191,14 @@ def is_executable(path: Path) -> bool:
     return path.is_file() and os.access(path, os.X_OK)
 
 
+def chatgpt_codex_candidates() -> tuple[Path, ...]:
+    rel = Path("ChatGPT.app/Contents/Resources/codex-cli/bin/codex")
+    return (
+        Path("/Applications") / rel,
+        Path.home() / "Applications" / rel,
+    )
+
+
 def detect_binary(runner: str, config: dict[str, Any]) -> dict[str, Any]:
     env_key = f"OIL_DELEGATE_{runner.upper()}_BIN"
     configured = os.environ.get(env_key) or config.get("runner_paths", {}).get(runner)
@@ -203,6 +211,16 @@ def detect_binary(runner: str, config: dict[str, Any]) -> dict[str, Any]:
             "source": source,
             "error": None if is_executable(path) else f"{env_key} or configured path is not executable",
         }
+
+    if runner == "codex" and sys.platform == "darwin":
+        for candidate in chatgpt_codex_candidates():
+            if is_executable(candidate):
+                return {
+                    "installed": True,
+                    "path": str(candidate),
+                    "source": "chatgpt-app",
+                    "error": None,
+                }
 
     for binary in RUNNER_BINARIES[runner]:
         found = shutil.which(binary)
@@ -730,11 +748,17 @@ def build_invocation(
     raise DelegateError(f"Unsupported runner: {runner}")
 
 
-def resume_command(runner: str, binary: str, session_id: str | None) -> str | None:
+def resume_command(
+    runner: str,
+    binary: str,
+    session_id: str | None,
+    source: str | None = None,
+) -> str | None:
     if not session_id:
         return None
-    # Standard executable names stay short; custom paths are kept in full so the command still works.
-    name = Path(binary).name if Path(binary).name in RUNNER_BINARIES[runner] else binary
+    # Standard executable names stay short unless resolved from an app bundle or custom path.
+    use_short = source not in ("chatgpt-app", "workbuddy-app") and Path(binary).name in RUNNER_BINARIES[runner]
+    name = Path(binary).name if use_short else binary
     return shlex.join(part.format(bin=name, sid=session_id) for part in RESUME_TEMPLATES[runner])
 
 
@@ -1040,6 +1064,11 @@ def execute_run(
     exit_code = 1
     env = os.environ.copy()
     env.update(env_updates)
+    if runner == "codex":
+        codex_extra_path = Path(binary_info["path"]).parent.parent / "codex-path"
+        if codex_extra_path.is_dir():
+            current_path = env.get("PATH", "")
+            env["PATH"] = f"{current_path}{os.pathsep}{codex_extra_path}" if current_path else str(codex_extra_path)
 
     popen_args: dict[str, Any] = {}
     if os.name == "posix":
@@ -1091,7 +1120,12 @@ def execute_run(
         "role": getattr(args, "resolved_role", None),
         "workspace": str(workspace),
         "mode": args.mode,
-        "resume_command": resume_command(runner, binary_info["path"], parsed["session_id"]),
+        "resume_command": resume_command(
+            runner,
+            binary_info["path"],
+            parsed["session_id"],
+            source=binary_info.get("source"),
+        ),
         "command": safe_command,
         "environment_overrides": env_updates,
         "output_path": str(paths["output"]),

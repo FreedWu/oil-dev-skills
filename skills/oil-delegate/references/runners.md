@@ -61,7 +61,7 @@
 
 ## Codex
 
-- 发现：`codex`。
+- 发现：macOS 优先检测 ChatGPT App 内置的 `Contents/Resources/codex-cli/bin/codex`（`/Applications` 与 `~/Applications`），不存在时回退到 `codex`（仍可通过 `OIL_DELEGATE_CODEX_BIN` 或 `config --set-bin codex=...` 覆盖）。
 - 新建：`codex exec --cd <workspace> --json --skip-git-repo-check ... -`，prompt 从 stdin 传入。
 - read：新会话使用 `--sandbox read-only`；续接使用 `-c sandbox_mode="read-only"`。
 - write：`--dangerously-bypass-approvals-and-sandbox`。

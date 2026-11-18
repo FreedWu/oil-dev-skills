@@ -795,6 +795,36 @@ class DelegateTestCase(unittest.TestCase):
         self.assertEqual(result["status"], "failed")
         self.assertIn("Codex turn failed", result["error"])
 
+    def test_codex_prefers_macos_chatgpt_app_before_path(self) -> None:
+        app_codex = self.root / "ChatGPT.app" / "Contents" / "Resources" / "codex-cli" / "bin" / "codex"
+        app_codex.parent.mkdir(parents=True)
+        app_codex.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        app_codex.chmod(0o755)
+        path_dir = self.root / "path-codex"
+        path_dir.mkdir()
+        path_codex = path_dir / "codex"
+        path_codex.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        path_codex.chmod(0o755)
+
+        with mock.patch.dict(os.environ, {"PATH": str(path_dir)}, clear=True):
+            with mock.patch.object(DELEGATE.sys, "platform", "darwin"):
+                with mock.patch.object(DELEGATE, "chatgpt_codex_candidates", return_value=(app_codex,)):
+                    detected = DELEGATE.detect_binary("codex", DELEGATE.default_config())
+                    self.assertEqual(detected["source"], "chatgpt-app")
+                    self.assertEqual(detected["path"], str(app_codex))
+                    configured = DELEGATE.detect_binary(
+                        "codex",
+                        {**DELEGATE.default_config(), "runner_paths": {"codex": str(path_codex)}},
+                    )
+                    self.assertEqual(configured["source"], "config")
+                    self.assertEqual(configured["path"], str(path_codex.resolve()))
+                with mock.patch.object(DELEGATE, "chatgpt_codex_candidates", return_value=(self.root / "missing",)):
+                    fallback = DELEGATE.detect_binary("codex", DELEGATE.default_config())
+                    self.assertEqual(fallback["source"], "PATH")
+                    self.assertEqual(Path(fallback["path"]).resolve(), path_codex.resolve())
+        resumed = DELEGATE.resume_command("codex", str(app_codex), "sid-1", source="chatgpt-app")
+        self.assertEqual(resumed, f"{shlex.quote(str(app_codex))} resume sid-1")
+
     def test_set_bin_and_default_runner_in_same_request(self) -> None:
         missing = self.run_cli(
             "config",
