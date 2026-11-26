@@ -164,6 +164,79 @@ class ReviewHelperTest(unittest.TestCase):
         self.assertEqual(review_helper._unquote_git_path('"a\\"b\\346\\226\\260.py"'), 'a"b新.py')
         self.assertEqual(review_helper._unquote_git_path("b/plain path.py\t"), "b/plain path.py")
 
+    def test_flags_oversized_code_growth_without_punishing_fixes_shrinks_or_data(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _init_repo(root)
+            (root / "src").mkdir()
+            (root / "generated").mkdir()
+            (root / "AGENTS.md").write_text(
+                "# Rules\n\n## 开发约定（oil-dev）\n"
+                "- 快测：`pytest -q {target}`\n"
+                "- 门禁：`pytest`\n"
+                "- 高风险：`src/core/**`\n"
+                "- 禁改：`generated/`\n"
+                "- 重构建：`native-core/`\n",
+                encoding="utf-8",
+            )
+            base_lines = [f"x_{i} = {i}" for i in range(510)]
+            (root / "src" / "growing.py").write_text("\n".join(base_lines) + "\n", encoding="utf-8")
+            (root / "src" / "small_fix.py").write_text("\n".join(base_lines) + "\n", encoding="utf-8")
+            (root / "src" / "shrinking.py").write_text("\n".join(base_lines) + "\n", encoding="utf-8")
+            (root / "generated" / "schema.py").write_text("\n".join(base_lines) + "\n", encoding="utf-8")
+            (root / "native-core").mkdir()
+            (root / "native-core" / "engine.c").write_text("int f(void) { return 0; }\n", encoding="utf-8")
+            _git(root, "add", ".")
+            _git(root, "commit", "-m", "init")
+
+            # Growing existing oversized code file (+40 net lines) -> flagged
+            (root / "src" / "growing.py").write_text(
+                "\n".join(base_lines + [f"extra_{i} = {i}" for i in range(40)]) + "\n",
+                encoding="utf-8",
+            )
+            # Tiny targeted fix (+5 net lines) in oversized file -> NOT flagged
+            (root / "src" / "small_fix.py").write_text(
+                "\n".join(base_lines + [f"fix_{i} = {i}" for i in range(5)]) + "\n",
+                encoding="utf-8",
+            )
+            # Shrinking oversized file (-50 net lines) -> NOT flagged
+            (root / "src" / "shrinking.py").write_text("\n".join(base_lines[:-50]) + "\n", encoding="utf-8")
+            # Do-not-edit generated file -> excluded from growth alert (handled as do_not_edit)
+            (root / "generated" / "schema.py").write_text(
+                "\n".join(base_lines + [f"gen_{i} = {i}" for i in range(60)]) + "\n",
+                encoding="utf-8",
+            )
+            # New oversized code file (420 lines > 400 default) -> flagged
+            (root / "src" / "brand_new.ts").write_text(
+                "\n".join(f"export const v{i} = {i};" for i in range(420)) + "\n",
+                encoding="utf-8",
+            )
+            # New large JSON data file -> NOT flagged
+            (root / "src" / "fixture.json").write_text(
+                "[\n" + ",\n".join(str(i) for i in range(450)) + "\n]\n",
+                encoding="utf-8",
+            )
+
+            report = review_helper.collect_review_context(root)
+            by_path = {item["path"]: item for item in report["oversized_growth_files"]}
+            self.assertEqual(set(by_path), {"src/growing.py", "src/brand_new.ts"})
+            self.assertEqual(by_path["src/growing.py"]["reason"], "existing_file_growing")
+            self.assertEqual(by_path["src/brand_new.ts"]["reason"], "new_file_over_limit")
+            self.assertEqual(report["heavy_build_files"], [])
+
+            # Custom file_limit + touching heavy_build path
+            (root / "AGENTS.md").write_text(
+                "# Rules\n\n## 开发约定（oil-dev）\n"
+                "- 文件上限：`600`\n"
+                "- 重构建：`native-core/`\n",
+                encoding="utf-8",
+            )
+            (root / "native-core" / "engine.c").write_text("int f(void) { return 1; }\n", encoding="utf-8")
+            custom_report = review_helper.collect_review_context(root)
+            self.assertEqual(custom_report["file_line_limit"], 600)
+            self.assertEqual(custom_report["oversized_growth_files"], [])
+            self.assertEqual(custom_report["heavy_build_files"], ["native-core/engine.c"])
+
 
 if __name__ == "__main__":
     unittest.main()

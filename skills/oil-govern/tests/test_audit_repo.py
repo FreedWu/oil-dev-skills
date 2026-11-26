@@ -339,6 +339,48 @@ class AuditRepoTest(unittest.TestCase):
                 ["../../../docs/missing.md"],
             )
 
+    def test_audits_quick_test_filter_heavy_build_globs_and_custom_file_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _init_repo(root)
+            (root / "src").mkdir()
+            (root / "tests").mkdir()
+            (root / "src" / "medium.ts").write_text("\n".join(f"export const a{i} = {i};" for i in range(320)) + "\n", encoding="utf-8")
+            (root / "src" / "huge.ts").write_text("\n".join(f"export const b{i} = {i};" for i in range(1050)) + "\n", encoding="utf-8")
+            (root / "tests" / "unit.test.ts").write_text("test('ok', () => {});\n", encoding="utf-8")
+            (root / "AGENTS.md").write_text(
+                "# Rules\n\n## 开发约定（oil-dev）\n"
+                "- 快测：`npm test`\n"
+                "- 门禁：`npm run ci`\n"
+                "- 高风险：`src/`\n"
+                "- 重构建：`missing-native/`\n"
+                "- 文件上限：`300`\n",
+                encoding="utf-8",
+            )
+            _git(root, "add", ".")
+            _git(root, "commit", "-m", "init")
+
+            report = audit_repo.run_governance_audit(root, scope="all")
+            docs = report["docs"]
+            ct = report["code_and_tests"]
+            self.assertFalse(docs["dev_profile_quick_test_has_scope_filter"])
+            self.assertIn("missing-native/", docs["dev_profile_unmatched_patterns"])
+            self.assertEqual(ct["file_line_limit"], 300)
+            self.assertEqual(ct["large_files_over_limit_total"], 2)
+            self.assertEqual(ct["severe_large_files_total"], 1)
+            self.assertEqual(ct["test_files_total"], 1)
+
+            # Updating quick_test to include --changed flips filter check to True
+            (root / "AGENTS.md").write_text(
+                "# Rules\n\n## 开发约定（oil-dev）\n"
+                "- 快测：`npm test -- --changed`\n"
+                "- 门禁：`npm run ci`\n"
+                "- 高风险：`src/`\n",
+                encoding="utf-8",
+            )
+            docs2 = audit_repo.run_governance_audit(root, scope="docs")["docs"]
+            self.assertTrue(docs2["dev_profile_quick_test_has_scope_filter"])
+
 
 if __name__ == "__main__":
     unittest.main()

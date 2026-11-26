@@ -65,13 +65,19 @@ class RepoMapTest(unittest.TestCase):
             root = Path(tmp)
             subprocess.run(["git", "init", "-b", "main"], cwd=str(root), check=True, capture_output=True)
             (root / "CLAUDE.md").write_text(
-                "# Project\n\n### 开发约定 oil-dev\n- 快测命令：`swift test --filter {target}`\n- 门禁：`make ci`\n",
+                "# Project\n\n### 开发约定 oil-dev\n"
+                "- 快测命令：`swift test --filter {target}`\n"
+                "- 门禁：`make ci`\n"
+                "- 重构建：`native/`\n"
+                "- 文件上限：`600`\n",
                 encoding="utf-8",
             )
             profile = repo_map.scan_repository(root)["dev_profile"]
             self.assertEqual(profile["source"], "CLAUDE.md:3")
             self.assertEqual(profile["quick_test"], ["swift test --filter {target}"])
             self.assertEqual(profile["merge_gate"], ["make ci"])
+            self.assertEqual(profile["heavy_build"], ["native/"])
+            self.assertEqual(profile["file_limit"], ["600"])
 
     def test_missing_workspace_returns_error(self) -> None:
         report = repo_map.scan_repository(Path("/nonexistent/oil-explore-test-dir"))

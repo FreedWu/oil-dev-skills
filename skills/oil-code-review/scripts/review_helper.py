@@ -34,6 +34,13 @@ STATUS_NAMES = {
 GIT_ESCAPES = {"n": 10, "t": 9, '"': 34, "\\": 92, "a": 7, "b": 8, "f": 12, "r": 13, "v": 11}
 HUMAN_HUNK_LIMIT = 6
 JSON_HUNK_LIMIT = 15
+DEFAULT_FILE_LINE_LIMIT = 500
+DEFAULT_NEW_FILE_LINE_LIMIT = 400
+GROWTH_NET_LINES_THRESHOLD = 30
+DATA_OR_DOC_EXTS = {
+    ".md", ".mdx", ".json", ".lock", ".yaml", ".yml", ".toml",
+    ".svg", ".txt", ".csv", ".strings", ".stringsdict",
+}
 
 
 # ---- 项目开发约定（oil-dev）解析：三个脚本各带一份逐字相同的副本，由仓库级测试校验 ----
@@ -54,6 +61,11 @@ DEV_PROFILE_KEYS = {
     "禁改": "do_not_edit",
     "禁改目录": "do_not_edit",
     "do-not-edit": "do_not_edit",
+    "重构建": "heavy_build",
+    "重构建触发": "heavy_build",
+    "heavy-build": "heavy_build",
+    "文件上限": "file_limit",
+    "file-limit": "file_limit",
 }
 DEV_PROFILE_LABELS = {
     "quick_test": "快测",
@@ -61,8 +73,10 @@ DEV_PROFILE_LABELS = {
     "merge_gate": "门禁",
     "high_risk": "高风险",
     "do_not_edit": "禁改",
+    "heavy_build": "重构建",
+    "file_limit": "文件上限",
 }
-DEV_PROFILE_GLOB_KEYS = {"high_risk", "do_not_edit"}
+DEV_PROFILE_GLOB_KEYS = {"high_risk", "do_not_edit", "heavy_build"}
 DEV_PROFILE_HEADING_RE = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
 DEV_PROFILE_ITEM_RE = re.compile(r"^\s*[-*+]\s+([^:：]+?)\s*[:：]\s*(.*)$")
 DEV_PROFILE_CODE_RE = re.compile(r"`([^`]+)`")
@@ -398,6 +412,7 @@ def collect_review_context(
 
     profile = _load_dev_profile(root)
     report["dev_profile"] = profile
+    do_not_edit_set: set[str] = set()
     if profile:
 
         def touched(patterns: list[str]) -> list[str]:
@@ -411,6 +426,41 @@ def collect_review_context(
 
         report["high_risk_files"] = touched(profile.get("high_risk", []))
         report["do_not_edit_files"] = touched(profile.get("do_not_edit", []))
+        do_not_edit_set = set(report["do_not_edit_files"])
+        if profile.get("heavy_build"):
+            report["heavy_build_files"] = touched(profile.get("heavy_build", []))
+
+    existing_limit, new_limit = _resolve_file_limits(profile)
+    oversized_growth: list[dict[str, Any]] = []
+    for f in files:
+        if f["status"] == "deleted" or f.get("binary") or f["path"] in do_not_edit_set:
+            continue
+        ext = Path(f["path"]).suffix.lower()
+        if not ext or ext in DATA_OR_DOC_EXTS:
+            continue
+        net_added = f["added"] - f["deleted"]
+        if f["status"] in {"added", "untracked"} and f["total_lines"] > new_limit:
+            oversized_growth.append(
+                {
+                    "path": f["path"],
+                    "total_lines": f["total_lines"],
+                    "net_added": net_added,
+                    "limit": new_limit,
+                    "reason": "new_file_over_limit",
+                }
+            )
+        elif f["total_lines"] > existing_limit and net_added > GROWTH_NET_LINES_THRESHOLD:
+            oversized_growth.append(
+                {
+                    "path": f["path"],
+                    "total_lines": f["total_lines"],
+                    "net_added": net_added,
+                    "limit": existing_limit,
+                    "reason": "existing_file_growing",
+                }
+            )
+    report["file_line_limit"] = existing_limit
+    report["oversized_growth_files"] = oversized_growth
 
     if allowed:
         report["allowed_patterns"] = allowed
@@ -421,6 +471,17 @@ def collect_review_context(
             and not (f.get("old_path") and _matches_any(f["old_path"], allowed))
         ]
     return report
+
+
+def _resolve_file_limits(profile: dict[str, Any] | None) -> tuple[int, int]:
+    if profile:
+        for raw in profile.get("file_limit", []):
+            match = re.search(r"\b(\d+)\b", str(raw))
+            if match:
+                val = int(match.group(1))
+                if 50 <= val <= 100_000:
+                    return val, val
+    return DEFAULT_FILE_LINE_LIMIT, DEFAULT_NEW_FILE_LINE_LIMIT
 
 
 def _print_human(report: dict[str, Any]) -> None:
@@ -447,8 +508,22 @@ def _print_human(report: dict[str, Any]) -> None:
         if report.get("do_not_edit_files"):
             locked = report["do_not_edit_files"]
             print(f"- [禁改目录] {len(locked)} 个文件，必须确认是否允许修改：{', '.join(f'`{p}`' for p in locked[:20])}")
+        if profile.get("heavy_build"):
+            heavy = report.get("heavy_build_files", [])
+            if heavy:
+                print(f"- [重构建触发] {len(heavy)} 个文件命中重构建目录，需按需重编重型产物：{', '.join(f'`{p}`' for p in heavy[:20])}")
+            else:
+                print("- [重构建] 未改到重构建触发目录，可复用既有重型构建产物")
     else:
         print("- 未找到项目开发约定（AGENTS.md 中标题含 oil-dev 的小节），高风险范围按 Skill 默认清单判断")
+    growth = report.get("oversized_growth_files") or []
+    growth_paths = {item["path"] for item in growth}
+    if growth:
+        desc = ", ".join(
+            f"`{item['path']}` ({item['total_lines']} 行, 净增 +{item['net_added']})"
+            for item in growth[:15]
+        )
+        print(f"- [文件膨胀告警] {len(growth)} 个代码文件超上限（{report.get('file_line_limit', DEFAULT_FILE_LINE_LIMIT)} 行）：{desc}")
     if "out_of_scope_files" in report:
         outside = report["out_of_scope_files"]
         if outside:
@@ -470,6 +545,8 @@ def _print_human(report: dict[str, Any]) -> None:
                 tag += f" [由 `{f['old_path']}` 重命名]"
             if f.get("binary"):
                 tag += " [二进制]"
+            if f["path"] in growth_paths:
+                tag += " [文件膨胀]"
             print(
                 f"- `{f['path']}` (+{f['added']}/-{f['deleted']}，全文件 {f['total_lines']} 行，改动块：{hunks}){tag}"
             )

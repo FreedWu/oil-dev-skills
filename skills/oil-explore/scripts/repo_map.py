@@ -110,6 +110,11 @@ DEV_PROFILE_KEYS = {
     "禁改": "do_not_edit",
     "禁改目录": "do_not_edit",
     "do-not-edit": "do_not_edit",
+    "重构建": "heavy_build",
+    "重构建触发": "heavy_build",
+    "heavy-build": "heavy_build",
+    "文件上限": "file_limit",
+    "file-limit": "file_limit",
 }
 DEV_PROFILE_LABELS = {
     "quick_test": "快测",
@@ -117,8 +122,10 @@ DEV_PROFILE_LABELS = {
     "merge_gate": "门禁",
     "high_risk": "高风险",
     "do_not_edit": "禁改",
+    "heavy_build": "重构建",
+    "file_limit": "文件上限",
 }
-DEV_PROFILE_GLOB_KEYS = {"high_risk", "do_not_edit"}
+DEV_PROFILE_GLOB_KEYS = {"high_risk", "do_not_edit", "heavy_build"}
 DEV_PROFILE_HEADING_RE = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
 DEV_PROFILE_ITEM_RE = re.compile(r"^\s*[-*+]\s+([^:：]+?)\s*[:：]\s*(.*)$")
 DEV_PROFILE_CODE_RE = re.compile(r"`([^`]+)`")

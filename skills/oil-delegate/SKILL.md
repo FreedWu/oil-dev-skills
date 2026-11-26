@@ -1,9 +1,9 @@
 ---
 name: oil-delegate
-description: "把边界清楚的单次任务委托给 Claude Code（cc）、WorkBuddy（wb）、Antigravity（agy）、Codex、Cursor、OpenCode、DeepSeek Harness（dsh）、Grok Build（grok）或 Kimi Code（kimi）CLI，返回结构化结果并续接原会话；处理首次静默扫描、启用执行器、模型选择与默认项，并可按用途（代码审查、方案挑刺、疑难会诊、实现）记住各自交给谁。用户明确要求 oil-delegate、统一调用或用上述全称/别名继续这些外部 CLI Agent 时使用；不用于普通直接问答或显式 /codex。"
+description: "把边界清楚的任务委托给外部 CLI Agent（cc/wb/agy/codex/cursor/opencode/dsh/grok/kimi），返回结构化结果、续接原会话并按角色记忆执行器与模型。明确要求 oil-delegate 或调用上述 CLI 时使用；不用于普通问答或显式 /codex。"
 license: MIT
 metadata:
-  version: "0.8.0"
+  version: "0.8.1"
 ---
 
 # oil-delegate

@@ -110,6 +110,11 @@ DEV_PROFILE_KEYS = {
     "禁改": "do_not_edit",
     "禁改目录": "do_not_edit",
     "do-not-edit": "do_not_edit",
+    "重构建": "heavy_build",
+    "重构建触发": "heavy_build",
+    "heavy-build": "heavy_build",
+    "文件上限": "file_limit",
+    "file-limit": "file_limit",
 }
 DEV_PROFILE_LABELS = {
     "quick_test": "快测",
@@ -117,8 +122,10 @@ DEV_PROFILE_LABELS = {
     "merge_gate": "门禁",
     "high_risk": "高风险",
     "do_not_edit": "禁改",
+    "heavy_build": "重构建",
+    "file_limit": "文件上限",
 }
-DEV_PROFILE_GLOB_KEYS = {"high_risk", "do_not_edit"}
+DEV_PROFILE_GLOB_KEYS = {"high_risk", "do_not_edit", "heavy_build"}
 DEV_PROFILE_HEADING_RE = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
 DEV_PROFILE_ITEM_RE = re.compile(r"^\s*[-*+]\s+([^:：]+?)\s*[:：]\s*(.*)$")
 DEV_PROFILE_CODE_RE = re.compile(r"`([^`]+)`")
@@ -417,17 +424,22 @@ def _audit_docs(root: Path, rel_files: list[str], ages: dict[str, dict[str, int 
     profile = _load_dev_profile(root)
     profile_missing: list[str] = []
     profile_unmatched: list[str] = []
+    quick_test_has_filter: bool | None = None
     if profile:
         profile_missing = [k for k in ("quick_test", "merge_gate", "high_risk") if not profile.get(k)]
-        # 只查高风险目录：规则失效会让深审分流悄悄失灵；禁改目录常是被忽略的生成目录，查了会误报
-        for pattern in profile.get("high_risk", []):
+        # 只查高风险与重构建目录：规则失效会让分流或缓存跳过悄悄失灵；禁改目录常是被忽略的生成目录，查了会误报
+        for pattern in (*profile.get("high_risk", []), *profile.get("heavy_build", [])):
             if not any(_matches_any(rel, [pattern]) for rel in rel_files):
                 profile_unmatched.append(pattern)
+        quick_cmds = profile.get("quick_test")
+        if quick_cmds:
+            quick_test_has_filter = any("{" in cmd or "--changed" in cmd for cmd in quick_cmds)
 
     return {
         "dev_profile": profile,
         "dev_profile_missing_keys": profile_missing,
         "dev_profile_unmatched_patterns": profile_unmatched,
+        "dev_profile_quick_test_has_scope_filter": quick_test_has_filter,
         "root_markdown_files": rule_files_summary,
         "oversized_rule_files": oversized_rule_files,
         "project_skill_files": project_skills_summary[:25],
@@ -440,6 +452,17 @@ def _audit_docs(root: Path, rel_files: list[str], ages: dict[str, dict[str, int 
     }
 
 
+def _parse_file_limit(profile: dict[str, Any] | None, default: int = 500) -> int:
+    if profile:
+        for raw in profile.get("file_limit", []):
+            match = re.search(r"\b(\d+)\b", str(raw))
+            if match:
+                val = int(match.group(1))
+                if 50 <= val <= 100_000:
+                    return val
+    return default
+
+
 def _audit_code_and_tests(root: Path, rel_files: list[str], churn: Counter[str]) -> dict[str, Any]:
     top_dir_churn: Counter[str] = Counter()
     for path_str, count in churn.items():
@@ -447,7 +470,12 @@ def _audit_code_and_tests(root: Path, rel_files: list[str], churn: Counter[str])
         top = parts[0] if len(parts) > 1 else "(root)"
         top_dir_churn[top] += count
 
+    profile = _load_dev_profile(root)
+    file_limit = _parse_file_limit(profile, default=500)
+    severe_threshold = max(1000, file_limit * 2)
     large_files: list[dict[str, Any]] = []
+    over_limit_total = 0
+    severe_large_total = 0
     for rel in rel_files:
         ext = Path(rel).suffix.lower()
         if ext in DATA_OR_DOC_EXTS or not ext:
@@ -462,6 +490,10 @@ def _audit_code_and_tests(root: Path, rel_files: list[str], churn: Counter[str])
         if b"\x00" in raw[:8192]:
             continue
         line_count = len(raw.decode("utf-8", errors="ignore").splitlines())
+        if line_count > file_limit:
+            over_limit_total += 1
+        if line_count > severe_threshold:
+            severe_large_total += 1
         if line_count > 400:
             large_files.append(
                 {
@@ -520,8 +552,13 @@ def _audit_code_and_tests(root: Path, rel_files: list[str], churn: Counter[str])
 
     return {
         "top_dir_recent_commits": [{"dir": d, "commits": c} for d, c in top_dir_churn.most_common(10)],
+        "file_line_limit": file_limit,
         "large_files_over_400_lines": large_files[:20],
         "large_files_total": len(large_files),
+        "large_files_over_limit_total": over_limit_total,
+        "severe_large_files_threshold": severe_threshold,
+        "severe_large_files_total": severe_large_total,
+        "test_files_total": sum(test_dirs.values()),
         "test_directories": [{"dir": d, "files": c} for d, c in test_dirs.most_common(15)],
         "defined_scripts": defined_scripts,
         "has_ci_config": bool(ci_steps) or any(
@@ -1068,7 +1105,9 @@ def _print_human(report: dict[str, Any]) -> None:
             print(f"- 开发约定：`{profile['source']}`{missing_note}")
             if docs["dev_profile_unmatched_patterns"]:
                 stale = ", ".join(f"`{p}`" for p in docs["dev_profile_unmatched_patterns"])
-                print(f"- 开发约定里匹配不到任何文件的高风险目录（可能已改名或删除）：{stale}")
+                print(f"- 开发约定里匹配不到任何文件的目录规则（可能已改名或删除）：{stale}")
+            if docs.get("dev_profile_quick_test_has_scope_filter") is False:
+                print("- 开发约定里的快测命令未包含 `{target}` 或 `--changed` 等按改动缩圈参数，需核对日常是否会跑整层慢测试")
         else:
             print("- 未找到开发约定（AGENTS.md 中标题含 oil-dev 的小节）：建议补上快测、门禁、高风险与禁改目录")
         stale_docs = [d for d in docs["docs_sample"] if d["days_since_touch"] is not None][:5]
@@ -1087,14 +1126,17 @@ def _print_human(report: dict[str, Any]) -> None:
             print(f"- 近 {CHURN_COMMIT_WINDOW} 次提交活跃目录：{hot}")
         if ct["test_directories"]:
             tdirs = ", ".join(f"`{x['dir']}` ({x['files']})" for x in ct["test_directories"][:8])
-            print(f"- 测试目录分布：{tdirs}")
+            print(f"- 测试目录分布（共 {ct.get('test_files_total', 0)} 个文件）：{tdirs}")
         if ct["defined_scripts"]:
             for k, items in ct["defined_scripts"].items():
                 print(f"- 已定义脚本（{k}）：{', '.join(f'`{i}`' for i in items[:25])}")
         if not ct.get("has_ci_config"):
             print("- 未发现 CI 配置：无法客观确认哪些测试真的会被执行")
         if ct["large_files_total"]:
-            print(f"- 超过 400 行的代码文件：共 {ct['large_files_total']} 个")
+            severe_note = ""
+            if ct.get("severe_large_files_total"):
+                severe_note = f"，其中超 {ct.get('severe_large_files_threshold', 1000)} 行的重度巨文件 {ct['severe_large_files_total']} 个"
+            print(f"- 超过 400 行的代码文件：共 {ct['large_files_total']} 个（超约定上限 {ct.get('file_line_limit', 500)} 行 {ct.get('large_files_over_limit_total', 0)} 个{severe_note}）")
             for lf in ct["large_files_over_400_lines"][:8]:
                 print(f"  - `{lf['path']}`（{lf['lines']} 行，近期改动 {lf['recent_commits']} 次）")
 
